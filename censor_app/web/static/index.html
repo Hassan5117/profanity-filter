@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Movie Censor Studio - Profanity Muter</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Navigation Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="logo-icon">🎬🔇</div>
+        <div>
+          <h1>Movie Censor Studio</h1>
+          <p class="subtitle">Intelligent Profanity Muting & Media Server Automation</p>
+        </div>
+      </div>
+      <div class="header-controls">
+        <div class="control-group">
+          <label for="modeSelect">Censorship Mode</label>
+          <select id="modeSelect">
+            <option value="mute" selected>Smooth Silence (40ms crossfade)</option>
+            <option value="bleep">Bleep Tone (1000Hz sine)</option>
+            <option value="duck">Audio Ducking (-24dB speech drop)</option>
+          </select>
+        </div>
+        <div class="control-group">
+          <label for="presetSelect">Profanity Preset</label>
+          <select id="presetSelect">
+            <option value="moderate" selected>Moderate (F-word, C-word, Shit, Ass, Bitch)</option>
+            <option value="strict">Strict Only (Extreme vulgarities & slurs)</option>
+            <option value="mild">All Profanities (Includes Damn, Hell, Crap)</option>
+          </select>
+        </div>
+      </div>
+    </header>
+
+    <!-- Source Selection Card -->
+    <section class="card input-card">
+      <div class="card-title">1. Select Media Files</div>
+      <div class="file-grid">
+        <div class="file-box">
+          <label>Video File (MP4, MKV, MOV, WebM):</label>
+          <div class="input-with-browse">
+            <input type="text" id="videoPathInput" placeholder="/path/to/movie.mp4 or drop file" />
+            <button id="browseVideoBtn" class="btn-secondary" title="Pick from folder on Mac">📁 Browse...</button>
+            <button id="pickVideoFileBtn" class="btn-secondary" title="Upload from computer">⬆ Upload</button>
+            <input type="file" id="videoFileInput" accept="video/*,.mkv,.mp4,.mov,.avi,.webm,.m4v" style="display: none;" />
+          </div>
+          <div id="videoDropZone" class="drop-zone">
+            <span>Drag & drop movie file here, or click to upload</span>
+            <div id="videoUploadProgress" class="upload-progress-box hidden">
+              <div id="videoUploadFill" class="upload-progress-fill" style="width: 0%"></div>
+              <span id="videoUploadText" class="upload-progress-text">Uploading: 0%</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="file-box">
+          <label>Subtitles (SRT, VTT, or embedded):</label>
+          <div class="input-with-browse">
+            <input type="text" id="srtPathInput" placeholder="Auto-detected if left empty or embedded" />
+            <button id="browseSrtBtn" class="btn-secondary" title="Pick from folder on Mac">📁 Browse...</button>
+            <button id="pickSrtFileBtn" class="btn-secondary" title="Upload from computer">⬆ Upload</button>
+            <input type="file" id="srtFileInput" accept=".srt,.vtt" style="display: none;" />
+          </div>
+          <div id="srtDropZone" class="drop-zone">
+            <span>Drag & drop .srt file here (optional)</span>
+            <div id="srtUploadProgress" class="upload-progress-box hidden">
+              <div id="srtUploadFill" class="upload-progress-fill" style="width: 0%"></div>
+              <span id="srtUploadText" class="upload-progress-text">Uploading: 0%</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="timing-settings-row">
+        <div class="control-group">
+          <label for="timingPresetSelect">Mute Envelope &amp; Precision</label>
+          <select id="timingPresetSelect">
+            <option value="safe" selected>Generous (Recommended: 0.35s pad + 0.25s lead-in to prevent cutting half-way)</option>
+            <option value="standard">Standard (0.25s pad + 0.15s lead-in)</option>
+            <option value="tight">Tight (0.15s pad, narrow)</option>
+            <option value="segment">Full Subtitle Line (100% guaranteed word capture)</option>
+          </select>
+        </div>
+        <div class="control-group">
+          <label for="syncOffsetInput">Subtitle Audio Sync Shift (+/- sec)</label>
+          <div class="sync-offset-control">
+            <button type="button" id="syncMinusHalfBtn" class="btn-xs" title="Nudge subtitles 0.5s earlier">-0.5s</button>
+            <button type="button" id="syncMinusTenthBtn" class="btn-xs" title="Nudge subtitles 0.2s earlier">-0.2s</button>
+            <input type="number" id="syncOffsetInput" step="0.1" value="0.0" style="width: 74px; text-align: center;" />
+            <button type="button" id="syncPlusTenthBtn" class="btn-xs" title="Nudge subtitles 0.2s later">+0.2s</button>
+            <button type="button" id="syncPlusHalfBtn" class="btn-xs" title="Nudge subtitles 0.5s later">+0.5s</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="scan-actions">
+        <button id="scanBtn" class="btn-primary">
+          <span class="btn-icon">⚡</span> Scan for Profanity
+        </button>
+        <span id="scanStatusText" class="status-msg"></span>
+      </div>
+    </section>
+
+    <!-- Studio Workspace (Visible after scan) -->
+    <main id="workspace" class="workspace hidden">
+      <!-- Media Stats Banner -->
+      <div class="stats-banner">
+        <div class="stat-item">
+          <span class="stat-label">Duration</span>
+          <span id="statDuration" class="stat-value">--:--</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Audio Track</span>
+          <span id="statAudioLayout" class="stat-value">Stereo</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Surround 5.1</span>
+          <span id="statSurroundBadge" class="badge badge-info">No</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Profanities Found</span>
+          <span id="statCount" class="stat-value">0</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Muted Duration</span>
+          <span id="statMuteDuration" class="stat-value">0.0s</span>
+        </div>
+      </div>
+
+      <!-- Main Columns: Left Preview Player, Right Detection Table -->
+      <div class="studio-grid">
+        <!-- Video Preview Player -->
+        <div class="player-panel card">
+          <div class="card-title">Clip Preview</div>
+          <div class="video-wrapper">
+            <video id="previewPlayer" controls preload="metadata"></video>
+          </div>
+          <div class="player-controls">
+            <button id="playSelectedBtn" class="btn-secondary">▶ Preview Selected Word Clip</button>
+            <span id="playerTimecode" class="timecode-display">00:00:00</span>
+          </div>
+        </div>
+
+        <!-- Detection Table -->
+        <div class="detection-panel card">
+          <div class="table-header-row">
+            <div class="card-title">Detected Profanities (<span id="activeCount">0</span> selected)</div>
+            <div class="table-actions">
+              <button id="selectAllBtn" class="btn-xs">Select All</button>
+              <button id="deselectAllBtn" class="btn-xs">Deselect All</button>
+            </div>
+          </div>
+
+          <div class="filter-toolbar">
+            <input type="text" id="tableFilterInput" placeholder="Filter text or words..." class="filter-input" />
+            <div class="tier-pills">
+              <button class="pill active" data-filter="all">All</button>
+              <button class="pill" data-filter="strict">Strict</button>
+              <button class="pill" data-filter="moderate">Moderate</button>
+              <button class="pill" data-filter="mild">Mild</button>
+            </div>
+          </div>
+
+          <div class="table-scroll-container">
+            <table class="detections-table">
+              <thead>
+                <tr>
+                  <th width="40"><input type="checkbox" id="masterCheckbox" checked /></th>
+                  <th width="150">Time &amp; Nudge</th>
+                  <th width="110">Word</th>
+                  <th width="85">Severity</th>
+                  <th>Context Dialogue</th>
+                  <th width="105">Preview</th>
+                </tr>
+              </thead>
+              <tbody id="detectionsTbody">
+                <!-- Dynamically populated -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Render & Output Configuration Bar -->
+      <section class="card output-card">
+        <div class="card-title">2. Processing & Output Options</div>
+        <div class="options-grid">
+          <div class="option-field">
+            <label>Output Video Destination:</label>
+            <input type="text" id="outputVideoInput" />
+          </div>
+          <div class="toggles-row">
+            <label class="checkbox-label">
+              <input type="checkbox" id="centerOnlyToggle" checked />
+              <span>Mute Center-Channel Only (5.1 surround dialog preservation)</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="cleanSrtToggle" checked />
+              <span>Generate Cleaned Subtitles (<code>.Cleaned.srt</code>)</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="wordTimingToggle" checked />
+              <span>Targeted Word Timing (only mute the swear word, not the whole sentence)</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="render-actions">
+          <button id="startProcessBtn" class="btn-render">
+            🚀 Censor & Export Media (<span id="renderBtnCount">0</span> words)
+          </button>
+        </div>
+      </section>
+    </main>
+
+    <!-- File Browser Modal -->
+    <div id="browserModal" class="modal hidden">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Browse Local Files</h3>
+          <button id="closeBrowserBtn" class="modal-close">&times;</button>
+        </div>
+        <div id="browserBookmarks" class="browser-bookmarks"></div>
+        <div class="browser-path-nav">
+          <button id="browserUpBtn" class="btn-xs">⬆ Up</button>
+          <span id="browserCurrentPath" class="browser-path-text"></span>
+        </div>
+        <div id="browserList" class="browser-list"></div>
+      </div>
+    </div>
+
+    <!-- Progress Modal -->
+    <div id="progressModal" class="modal hidden">
+      <div class="modal-content progress-modal-content">
+        <h3 id="progressTitle">Censoring Media...</h3>
+        <p id="progressSubtitle" class="subtitle">Losslessly copying video stream & processing audio...</p>
+        
+        <div class="progress-bar-container">
+          <div id="progressBar" class="progress-bar-fill" style="width: 0%"></div>
+        </div>
+
+        <div class="progress-metrics">
+          <span id="progressPercent">0.0%</span>
+          <span id="progressTime">00:00 / 00:00</span>
+        </div>
+
+        <div id="progressCompletionActions" class="completion-actions hidden">
+          <button id="revealFinderBtn" class="btn-primary">📂 Reveal in Finder</button>
+          <button id="previewCleanedBtn" class="btn-secondary">▶ Play Cleaned Clip</button>
+          <button id="closeProgressBtn" class="btn-secondary">Done</button>
+        </div>
+
+        <div id="progressErrorMsg" class="error-msg hidden"></div>
+        <button id="cancelProcessBtn" class="btn-danger">Cancel Processing</button>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

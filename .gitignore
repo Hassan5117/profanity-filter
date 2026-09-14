@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+.venv/
+
+# App local data & caches
+uploads/
+.cache/
+*.Cleaned.*
+config.json
+ffmpeg_audio_filter_temp.txt
+censor_filter_*.txt
+
+# Media files (prevent large binary video commits)
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.m4v
+*.srt
+*.vtt
+
+# OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
