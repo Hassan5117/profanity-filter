@@ -163,11 +163,14 @@ def run_process_command(args):
 
 def run_watch_command(args):
     watch_dir = args.directory
+    output_dir = args.output_dir
     config = Config()
     if args.mode:
         config.set("mode", args.mode)
+    if output_dir:
+        config.set("output_dir", output_dir)
 
-    watcher = MediaWatcher(watch_dir=watch_dir, config=config)
+    watcher = MediaWatcher(watch_dir=watch_dir, output_dir=output_dir, config=config)
     try:
         watcher.run_forever()
     except KeyboardInterrupt:
@@ -236,6 +239,7 @@ def build_parser() -> argparse.ArgumentParser:
     # watch
     watch_p = subparsers.add_parser("watch", help="Run folder watcher daemon for media server automation")
     watch_p.add_argument("directory", help="Directory path to monitor for incoming media")
+    watch_p.add_argument("-o", "--output-dir", help="Separate destination directory for cleaned copies (leaves original untouched)")
     watch_p.add_argument("--mode", choices=["mute", "bleep", "duck"], help="Censorship mode override")
 
     return parser

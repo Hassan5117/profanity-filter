@@ -67,6 +67,40 @@ class TestWatcher(unittest.TestCase):
         self.assertTrue(expected_cleaned_srt.exists(), "Cleaned SRT should exist alongside original")
         self.assertGreater(expected_cleaned_vid.stat().st_size, 0)
 
+    def test_watcher_separate_output_dir(self):
+        output_dir = Path(tempfile.mkdtemp())
+        try:
+            vid_path = self.watch_path / "Subfolder" / "SeparateMovie.mp4"
+            vid_path.parent.mkdir(parents=True, exist_ok=True)
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "testsrc=duration=2:size=160x120:rate=15",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                "-c:v", "libx264", "-c:a", "aac",
+                str(vid_path)
+            ]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+            srt_path = vid_path.parent / "SeparateMovie.srt"
+            srt_path.write_text("1\n00:00:00,500 --> 00:00:01,500\nWhat bullshit!\n")
+
+            watcher = MediaWatcher(watch_dir=str(self.watch_path), output_dir=str(output_dir), config=self.config)
+            watcher.scan_and_process_once()
+
+            # Original remains untouched in watch directory
+            self.assertTrue(vid_path.exists())
+            self.assertTrue(srt_path.exists())
+            self.assertFalse((vid_path.parent / "SeparateMovie.Cleaned.mp4").exists())
+
+            # Output created in separate output directory (preserving relative structure)
+            expected_cleaned_vid = output_dir / "Subfolder" / "SeparateMovie.Cleaned.mp4"
+            expected_cleaned_srt = output_dir / "Subfolder" / "SeparateMovie.Cleaned.srt"
+            self.assertTrue(expected_cleaned_vid.exists(), "Cleaned video should exist in separate output dir")
+            self.assertTrue(expected_cleaned_srt.exists(), "Cleaned SRT should exist in separate output dir")
+        finally:
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

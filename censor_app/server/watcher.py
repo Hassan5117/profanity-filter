@@ -17,9 +17,17 @@ VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 INCOMPLETE_EXTENSIONS = {".part", ".crdownload", ".tmp", "!qb", ".downloading", ".incomplete"}
 
 class MediaWatcher:
-    def __init__(self, watch_dir: str, config: Optional[Config] = None, logger: Optional[Callable[[str], None]] = None):
+    def __init__(
+        self,
+        watch_dir: str,
+        output_dir: Optional[str] = None,
+        config: Optional[Config] = None,
+        logger: Optional[Callable[[str], None]] = None
+    ):
         self.watch_dir = Path(watch_dir).resolve()
         self.config = config or Config()
+        out_cfg = output_dir or self.config.get("output_dir")
+        self.output_dir = Path(out_cfg).resolve() if out_cfg else None
         self.logger = logger or print
         self._stop_event = threading.Event()
         self.processed_files: Set[str] = set()
@@ -65,7 +73,17 @@ class MediaWatcher:
         if clean_suffix.lower() in video_path.stem.lower() or "censored" in video_path.stem.lower():
             return False
 
-        output_video_path = video_path.parent / f"{video_path.stem}{clean_suffix}{video_path.suffix}"
+        if self.output_dir:
+            try:
+                rel_parent = video_path.parent.relative_to(self.watch_dir)
+                dest_dir = self.output_dir / rel_parent
+            except ValueError:
+                dest_dir = self.output_dir
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            dest_dir = video_path.parent
+
+        output_video_path = dest_dir / f"{video_path.stem}{clean_suffix}{video_path.suffix}"
         if output_video_path.exists():
             self.log(f"Cleaned version already exists for {video_path.name}, skipping.")
             return False
@@ -137,7 +155,7 @@ class MediaWatcher:
                 self.log(f"Successfully generated cleaned video: {output_video_path.name}")
                 # Step 4: Write cleaned subtitles if requested
                 if self.config.get("generate_clean_srt", True):
-                    out_srt = video_path.parent / f"{video_path.stem}{clean_suffix}.srt"
+                    out_srt = dest_dir / f"{video_path.stem}{clean_suffix}.srt"
                     generate_cleaned_srt(subs, pf, str(out_srt))
                     self.log(f"Generated sanitized subtitles: {out_srt.name}")
                 return True
@@ -158,6 +176,15 @@ class MediaWatcher:
             return
 
         for root, dirs, files in os.walk(self.watch_dir):
+            # Skip output directory if it is located inside watch_dir
+            if self.output_dir:
+                try:
+                    if Path(root).resolve() == self.output_dir or self.output_dir in Path(root).resolve().parents:
+                        dirs.clear()
+                        continue
+                except Exception:
+                    pass
+
             for file_name in files:
                 p = Path(root) / file_name
 

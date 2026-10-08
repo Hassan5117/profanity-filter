@@ -28,7 +28,7 @@ def get_target_media_path() -> Path:
 def main():
     target = get_target_media_path()
     if not target:
-        print("Usage: python3 -m censor_app.server.postprocess <path-to-video-file>")
+        print("Usage: python3 -m censor_app.server.postprocess <path-to-video-file> [output-directory]")
         print("Or run from Radarr/Sonarr custom script hook with environment variables set.")
         sys.exit(1)
 
@@ -36,13 +36,18 @@ def main():
         print(f"[Error] Target file does not exist: {target}")
         sys.exit(1)
 
+    output_dir = os.environ.get("CENSOR_OUTPUT_DIR") or (sys.argv[2] if len(sys.argv) > 2 else None)
+
     print(f"[PostProcess] Initiating profanity censorship for: {target}")
     config = Config()
-    watcher = MediaWatcher(watch_dir=str(target.parent), config=config)
+    if output_dir:
+        config.set("output_dir", output_dir)
+    watcher = MediaWatcher(watch_dir=str(target.parent), output_dir=output_dir, config=config)
     
     success = watcher.process_single_video(target)
     if success:
-        print(f"[PostProcess] Success! Cleaned media created alongside original.")
+        dest_msg = f"in {output_dir}" if output_dir else "alongside original"
+        print(f"[PostProcess] Success! Cleaned media created {dest_msg}.")
         sys.exit(0)
     else:
         print(f"[PostProcess] Finished (no action required or error encountered).")

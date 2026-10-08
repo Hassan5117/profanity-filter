@@ -103,11 +103,15 @@ python3 mute_audio_from_srt.py -i movie.mp4 -s movie.srt -o movie_clean.mp4
 ### Run as a Folder Watcher Daemon
 Continuously monitors a media directory (e.g. your movie download library):
 ```bash
+# Output alongside original files:
 python3 -m censor_app.cli watch /media/movies --mode mute
+
+# Output to a separate folder (leaves original torrents completely untouched for seeding):
+python3 -m censor_app.cli watch /mnt/torrents/completed -o /mnt/media/clean --mode mute
 ```
 - Waits for downloads or transfers to complete (file stability check).
 - Detects paired `.srt` files or extracts embedded subtitles from `.mkv`/`.mp4`.
-- Generates `Movie.Cleaned.mp4` and `Movie.Cleaned.srt` alongside the original.
+- Generates `Movie.Cleaned.mp4` and `Movie.Cleaned.srt` alongside or in your designated `--output-dir`.
 - Automatically skips already cleaned files to prevent loops.
 
 ### Radarr / Sonarr / qBittorrent Post-Processing Hook

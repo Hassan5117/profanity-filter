@@ -20,6 +20,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "generate_clean_srt": True,  # Generate [name].Cleaned.srt alongside output
     "censor_char": "*",  # Character for subtitle masking
     "output_suffix": ".Cleaned",  # e.g. Movie.Cleaned.mp4
+    "output_dir": None,  # Optional separate destination directory for cleaned media
     "watch_interval_seconds": 10,
     "file_stability_wait_seconds": 5,
 }
