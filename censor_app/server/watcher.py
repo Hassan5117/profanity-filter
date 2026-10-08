@@ -103,9 +103,27 @@ class MediaWatcher:
             if not streams:
                 self.log(f"No subtitle tracks found for {video_path.name}. Cannot detect profanity.")
                 return False
-            self.log(f"Extracting embedded subtitle track (codec: {streams[0]['codec']})...")
+
+            text_streams = [s for s in streams if s.get("is_text", True)]
+            if not text_streams:
+                codecs = ", ".join(set(s.get("codec", "unknown") for s in streams))
+                self.log(
+                    f"Embedded subtitles in {video_path.name} are image-based ({codecs}), "
+                    f"not text. Please download an external .srt file and place it next to the video to censor."
+                )
+                return False
+
+            # Prefer English text streams if available
+            selected = text_streams[0]
+            for s in text_streams:
+                if s.get("language", "").lower() in ("eng", "en"):
+                    selected = s
+                    break
+
+            sub_idx = selected.get("sub_index", 0)
+            self.log(f"Extracting embedded text subtitle track #{sub_idx} (codec: {selected['codec']}, lang: {selected.get('language', 'und')})...")
             try:
-                temp_extracted_srt = extract_embedded_subtitle(str(video_path), stream_index=0)
+                temp_extracted_srt = extract_embedded_subtitle(str(video_path), stream_index=sub_idx)
                 active_srt_path = temp_extracted_srt
             except Exception as e:
                 self.log(f"Error extracting embedded subtitle: {e}")

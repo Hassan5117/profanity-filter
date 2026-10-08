@@ -28,13 +28,15 @@ def run_scan_command(args):
         if candidate.exists():
             srt_path = str(candidate)
         else:
-            streams = probe_subtitle_streams(video_path)
+            streams = probe_subtitle_streams(video_path, text_only=True)
             if streams:
-                print(f"[*] Extracting embedded subtitle track (codec: {streams[0]['codec']})...")
-                temp_srt = extract_embedded_subtitle(video_path, stream_index=0)
+                # Prefer English
+                sel = next((s for s in streams if s.get("language", "").lower() in ("eng", "en")), streams[0])
+                print(f"[*] Extracting embedded text subtitle track #{sel['sub_index']} (codec: {sel['codec']}, lang: {sel.get('language', 'und')})...")
+                temp_srt = extract_embedded_subtitle(video_path, stream_index=sel["sub_index"])
                 srt_path = temp_srt
             else:
-                print("[Error] No external or embedded subtitles found. Please provide --srt.")
+                print("[Error] No external or embedded text subtitles found. Please provide an external --srt file.")
                 sys.exit(1)
 
     try:
@@ -99,13 +101,14 @@ def run_process_command(args):
         if candidate.exists():
             srt_path = str(candidate)
         else:
-            streams = probe_subtitle_streams(video_path)
+            streams = probe_subtitle_streams(video_path, text_only=True)
             if streams:
-                print(f"[*] Extracting embedded subtitle track (codec: {streams[0]['codec']})...")
-                temp_srt = extract_embedded_subtitle(video_path, stream_index=0)
+                sel = next((s for s in streams if s.get("language", "").lower() in ("eng", "en")), streams[0])
+                print(f"[*] Extracting embedded text subtitle track #{sel['sub_index']} (codec: {sel['codec']}, lang: {sel.get('language', 'und')})...")
+                temp_srt = extract_embedded_subtitle(video_path, stream_index=sel["sub_index"])
                 srt_path = temp_srt
             else:
-                print("[Error] No external or embedded subtitles found. Please provide --srt.")
+                print("[Error] No external or embedded text subtitles found. Please provide an external --srt file.")
                 sys.exit(1)
 
     try:

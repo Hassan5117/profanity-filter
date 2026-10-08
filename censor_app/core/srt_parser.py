@@ -166,10 +166,14 @@ def parse_srt(file_path: str) -> List[SubtitleItem]:
     return parse_srt_content(content)
 
 
-def probe_subtitle_streams(video_path: str) -> List[Dict[str, Any]]:
+BITMAP_SUBTITLE_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "vobsub", "xsub", "pgssub"}
+TEXT_SUBTITLE_CODECS = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
+
+
+def probe_subtitle_streams(video_path: str, text_only: bool = False) -> List[Dict[str, Any]]:
     """
     Use ffprobe to detect embedded subtitle tracks in a video file.
-    Returns list of dicts with stream index, codec, language, title.
+    Returns list of dicts with stream index, sub_index, codec, language, title, is_text.
     """
     cmd = [
         "ffprobe",
@@ -184,11 +188,17 @@ def probe_subtitle_streams(video_path: str) -> List[Dict[str, Any]]:
         import json
         data = json.loads(res.stdout)
         streams = []
-        for s in data.get("streams", []):
+        for i, s in enumerate(data.get("streams", [])):
+            codec = s.get("codec_name", "unknown").lower()
+            is_text = codec in TEXT_SUBTITLE_CODECS or codec not in BITMAP_SUBTITLE_CODECS
+            if text_only and not is_text:
+                continue
             tags = s.get("tags", {})
             streams.append({
                 "stream_index": s.get("index"),
-                "codec": s.get("codec_name", "unknown"),
+                "sub_index": i,
+                "codec": codec,
+                "is_text": is_text,
                 "language": tags.get("language", "und"),
                 "title": tags.get("title", f"Track {s.get('index')}")
             })
