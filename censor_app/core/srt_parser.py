@@ -190,7 +190,7 @@ def probe_subtitle_streams(video_path: str, text_only: bool = False) -> List[Dic
         streams = []
         for i, s in enumerate(data.get("streams", [])):
             codec = s.get("codec_name", "unknown").lower()
-            is_text = codec in TEXT_SUBTITLE_CODECS or codec not in BITMAP_SUBTITLE_CODECS
+            is_text = codec in TEXT_SUBTITLE_CODECS
             if text_only and not is_text:
                 continue
             tags = s.get("tags", {})
@@ -203,7 +203,8 @@ def probe_subtitle_streams(video_path: str, text_only: bool = False) -> List[Dic
                 "title": tags.get("title", f"Track {s.get('index')}")
             })
         return streams
-    except Exception:
+    except Exception as e:
+        print(f"[probe] ffprobe failed on {video_path}: {e}", flush=True)
         return []
 
 
