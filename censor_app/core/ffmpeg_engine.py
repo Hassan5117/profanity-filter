@@ -61,11 +61,29 @@ class FFmpegProbe:
 
 
 class AudioFilterBuilder:
+    CHUNK_SIZE = 50
+
     @staticmethod
     def build_enable_expression(intervals: List[Tuple[float, float]]) -> str:
         """Create FFmpeg between expression for intervals."""
         parts = [f"between(t,{round(s, 3)},{round(e, 3)})" for s, e in intervals]
         return "+".join(parts)
+
+    @classmethod
+    def build_chunked_volume(cls, intervals: List[Tuple[float, float]], vol: Any) -> str:
+        """Split intervals into chunks of 50 to avoid FFmpeg eval.c recursion limit."""
+        chunks = [intervals[i:i + cls.CHUNK_SIZE] for i in range(0, len(intervals), cls.CHUNK_SIZE)]
+        return ",".join(f"volume={vol}:enable='{cls.build_enable_expression(c)}'" for c in chunks)
+
+    @classmethod
+    def build_chunked_beep_gate(cls, intervals: List[Tuple[float, float]], active_vol: float) -> str:
+        """Gate a continuous sine wave across arbitrary intervals without exceeding eval depth."""
+        chunks = [intervals[i:i + cls.CHUNK_SIZE] for i in range(0, len(intervals), cls.CHUNK_SIZE)]
+        exprs = [f"({cls.build_enable_expression(c)})" for c in chunks]
+        if len(exprs) == 1:
+            return f"volume=0:enable='not({exprs[0]})',volume={active_vol}"
+        # Mute when none of the chunks are active by chaining aselect/volume or nested max
+        return f"volume={active_vol}:enable='" + "+".join(exprs) + "'"
 
     @classmethod
     def build_filter(
@@ -85,44 +103,38 @@ class AudioFilterBuilder:
         if not intervals:
             return "", False
 
-        enable_expr = cls.build_enable_expression(intervals)
-        
-        # Decide base action on target channel
-        if mode == "duck":
-            core_action = f"volume={ducking_vol}:enable='{enable_expr}'"
-        elif mode == "bleep":
-            core_action = f"volume=0:enable='{enable_expr}'"
-        else:  # mute
-            core_action = f"volume=0:enable='{enable_expr}'"
+        target_vol = ducking_vol if mode == "duck" else 0
+        core_action = cls.build_chunked_volume(intervals, target_vol)
 
         # Case 1: 5.1 Center-channel isolation requested
         if is_surround_51 and center_channel_only:
             if mode == "bleep":
-                # For 5.1 bleep: split channels, mute FC, inject beep into FC, rejoin
                 dur_arg = f":d={total_duration}" if total_duration > 0 else ""
+                beep_gate = cls.build_chunked_beep_gate(intervals, 0.8)
                 filter_str = (
                     f"sine=f={bleep_freq}:r=48000{dur_arg}[raw_beep]; "
-                    f"[raw_beep]volume=0.8:enable='{enable_expr}'[beep]; "
-                    f"[0:a]channelsplit=channel_layout=5.1[fl][fr][fc][lfe][sl][sr]; "
+                    f"[raw_beep]{beep_gate}[beep]; "
+                    f"[0:a]aformat=channel_layouts=5.1,channelsplit=channel_layout=5.1[fl][fr][fc][lfe][bl][br]; "
                     f"[fc]{core_action}[fc_muted]; "
                     f"[fc_muted][beep]amix=inputs=2:duration=first:dropout_transition=0[fc_out]; "
-                    f"[fl][fr][fc_out][lfe][sl][sr]join=inputs=6:channel_layout=5.1[aout]"
+                    f"[fl][fr][fc_out][lfe][bl][br]join=inputs=6:channel_layout=5.1[aout]"
                 )
                 return filter_str, True
             else:
                 filter_str = (
-                    f"[0:a]channelsplit=channel_layout=5.1[fl][fr][fc][lfe][sl][sr]; "
+                    f"[0:a]aformat=channel_layouts=5.1,channelsplit=channel_layout=5.1[fl][fr][fc][lfe][bl][br]; "
                     f"[fc]{core_action}[fc_clean]; "
-                    f"[fl][fr][fc_clean][lfe][sl][sr]join=inputs=6:channel_layout=5.1[aout]"
+                    f"[fl][fr][fc_clean][lfe][bl][br]join=inputs=6:channel_layout=5.1[aout]"
                 )
                 return filter_str, True
 
         # Case 2: Standard stereo / all-channel bleep
         if mode == "bleep":
             dur_arg = f":d={total_duration}" if total_duration > 0 else ""
+            beep_gate = cls.build_chunked_beep_gate(intervals, 0.7)
             filter_str = (
                 f"sine=f={bleep_freq}:r=48000{dur_arg}[raw_beep]; "
-                f"[raw_beep]volume=0.7:enable='{enable_expr}'[beep]; "
+                f"[raw_beep]{beep_gate}[beep]; "
                 f"[0:a]{core_action}[a_muted]; "
                 f"[a_muted][beep]amix=inputs=2:duration=first:dropout_transition=0[aout]"
             )
@@ -194,10 +206,15 @@ class FFmpegEngine:
             else:
                 cmd.extend(["-filter_script:a", filter_script_path, "-map", "0:v:0", "-map", "0:a:0"])
 
-            # Copy video stream losslessly
-            cmd.extend(["-c:v", "copy"])
-            # High-quality audio encoding
-            cmd.extend(["-c:a", "aac", "-b:a", "320k"])
+            # Copy video stream losslessly and preserve Dolby Vision metadata
+            cmd.extend(["-strict", "unofficial", "-c:v", "copy"])
+            if output_video.lower().endswith(".mp4"):
+                cmd.extend(["-tag:v", "hvc1"])
+            # Encode 5.1 surround as E-AC3 (Dolby Digital Plus) so channel layout stays standard 5.1
+            if is_surround:
+                cmd.extend(["-c:a", "eac3", "-b:a", "640k"])
+            else:
+                cmd.extend(["-c:a", "aac", "-b:a", "320k"])
 
             # Progress pipe
             cmd.extend(["-progress", "pipe:1", "-nostats", output_video])
