@@ -503,7 +503,7 @@ class TestWebHandler(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with mock.patch.dict(os.environ, {"HOME": self.test_dir}, clear=False):
+        with mock.patch.dict(os.environ, {"HOME": self.test_dir, "USERPROFILE": self.test_dir}, clear=False):
             s_scan, _, b_scan = self._execute_request(
                 "POST", "/api/scan",
                 body=json.dumps({

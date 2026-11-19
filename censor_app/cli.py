@@ -235,7 +235,18 @@ def run_watch_command(args):
         watcher.stop()
 
 
+def _configure_console_streams():
+    """Ensure Windows cp1252 consoles do not raise UnicodeEncodeError on UTF-8 output."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
 def run_studio_command(args):
+    _configure_console_streams()
     from censor_app.web.server import run_studio_server
     deps = FFmpegProbe.check_dependencies()
     if not deps["ok"]:
@@ -251,7 +262,7 @@ def run_studio_command(args):
         print(f"[Info] Port {port} was busy; using port {actual_port} instead.")
     url = f"http://{host}:{actual_port}"
     print(f"\n=======================================================")
-    print(f"🎬 Movie Censor Studio running at: {url}")
+    print(f"Movie Censor Studio running at: {url}")
     print(f"Close this window or click Stop Studio in the browser to quit.")
     print(f"=======================================================\n")
 
@@ -405,6 +416,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main():
+    _configure_console_streams()
     parser = build_parser()
     if len(sys.argv) == 1:
         # Default to studio if no args passed

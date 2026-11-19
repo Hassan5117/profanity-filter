@@ -1013,7 +1013,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
 
 
 class StudioHTTPServer(ThreadingHTTPServer):
-    allow_reuse_address = True
+    allow_reuse_address = (sys.platform != "win32")
 
 
 def run_studio_server(
@@ -1021,12 +1021,17 @@ def run_studio_server(
     port: int = 8000,
     max_port_attempts: int = 20,
 ) -> ThreadingHTTPServer:
+    busy_errnos = {
+        errno.EADDRINUSE,
+        getattr(errno, "WSAEADDRINUSE", 10048),
+        getattr(errno, "WSAEACCES", 10013),
+    }
     for offset in range(max_port_attempts):
         candidate_port = port + offset
         try:
             return StudioHTTPServer((host, candidate_port), StudioRequestHandler)
         except OSError as e:
-            if e.errno == errno.EADDRINUSE and offset < max_port_attempts - 1:
+            if e.errno in busy_errnos and offset < max_port_attempts - 1:
                 continue
             raise
     raise RuntimeError(f"Unable to bind server on {host}:{port}-{port + max_port_attempts - 1}")

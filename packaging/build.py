@@ -196,6 +196,8 @@ def run_smoke_test(expect_bundled: bool) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=env,
     )
 
@@ -285,7 +287,7 @@ def create_archive() -> Path:
         for file_path in sorted(src_dir.rglob("*")):
             if file_path.is_file():
                 arcname = Path("MovieCensorStudio") / file_path.relative_to(src_dir)
-                zf.write(file_path, arcname=str(arcname))
+                zf.write(file_path, arcname=arcname.as_posix())
     return zip_path
 
 
