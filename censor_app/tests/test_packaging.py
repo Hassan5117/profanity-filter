@@ -10,7 +10,11 @@ import censor_app.core.config as config_module
 import censor_app.core.ffmpeg_engine as ffmpeg_engine_module
 import censor_app.web.server as server_module
 from censor_app.core.config import Config, ENV_VAR_MAP
-from censor_app.core.ffmpeg_engine import is_bundled_binary, resolve_media_binary
+from censor_app.core.ffmpeg_engine import (
+    is_bundled_binary,
+    resolve_media_binary,
+    supports_slash_filter_option,
+)
 from censor_app.tests.test_web_server import MockServer, MockSocket
 from censor_app.web.server import StudioRequestHandler
 
@@ -159,6 +163,40 @@ class TestPackagingSupport(unittest.TestCase):
         s_shut, shut = _exec("POST", "/api/shutdown", b"{}")
         self.assertEqual(s_shut, 200)
         self.assertEqual(shut["status"], "shutting_down")
+
+    def test_supports_slash_filter_option_versions(self):
+        samples = [
+            (
+                "ffmpeg-9.0.2",
+                "ffmpeg version 9.0.2\nlibavfilter 12. 1.102 / 12. 1.102\n",
+                True,
+            ),
+            (
+                "ffmpeg-master",
+                "ffmpeg version N-123456-gabcdef\nlibavfilter 12. 12.100 / 12. 12.100\n",
+                True,
+            ),
+            (
+                "ffmpeg-8.0.1",
+                "ffmpeg version 8.0.1\nlibavfilter 11. 4.100 / 11. 4.100\n",
+                True,
+            ),
+            (
+                "ffmpeg-6.1.1",
+                "ffmpeg version 6.1.1\nlibavfilter 9. 12.100 / 9. 12.100\n",
+                False,
+            ),
+        ]
+        orig_cache = dict(ffmpeg_engine_module._SLASH_FILTER_SUPPORT_CACHE)
+        try:
+            for bin_id, out_text, expected in samples:
+                ffmpeg_engine_module._SLASH_FILTER_SUPPORT_CACHE.clear()
+                fake_res = mock.MagicMock(stdout=out_text, stderr="", returncode=0)
+                with mock.patch.object(ffmpeg_engine_module.subprocess, "run", return_value=fake_res):
+                    self.assertEqual(supports_slash_filter_option(bin_id), expected, msg=bin_id)
+        finally:
+            ffmpeg_engine_module._SLASH_FILTER_SUPPORT_CACHE.clear()
+            ffmpeg_engine_module._SLASH_FILTER_SUPPORT_CACHE.update(orig_cache)
 
 
 if __name__ == "__main__":

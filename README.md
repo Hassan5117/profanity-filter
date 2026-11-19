@@ -178,7 +178,7 @@ The test suite runs with Python's built-in `unittest` runner:
 python3 -m unittest discover -s censor_app/tests
 ```
 
-All 68 unit and integration tests verify:
+All 69 unit and integration tests verify:
 - Configuration loading, `.env` parsing, secret masking, and credential precedence
 - Standalone packaging binary resolution, frozen `.env`/static asset discovery, and shutdown/health endpoints
 - Subtitle parsing (SRT, WebVTT, encodings, HTML/SSA tags)
@@ -214,7 +214,7 @@ profanity-filter/
 │   │       ├── index.html
 │   │       ├── style.css
 │   │       └── app.js
-│   ├── tests/                  # Automated test suite (68 unit & integration tests)
+│   ├── tests/                  # Automated test suite (69 unit & integration tests)
 │   │   ├── test_config.py
 │   │   ├── test_packaging.py
 │   │   └── test_subtitle_fetcher.py

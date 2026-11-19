@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -95,6 +96,48 @@ def get_ffmpeg_path() -> str:
 
 def get_ffprobe_path() -> str:
     return resolve_media_binary("ffprobe") or "ffprobe"
+
+
+_SLASH_FILTER_SUPPORT_CACHE: Dict[str, bool] = {}
+
+
+def supports_slash_filter_option(ffmpeg_bin: Optional[str] = None) -> bool:
+    """Return True if ffmpeg supports FFmpeg 7+/9+ -/filter:a and -/filter_complex syntax."""
+    bin_path = ffmpeg_bin or get_ffmpeg_path()
+    try:
+        cache_key = str(Path(bin_path).resolve()) if os.path.exists(bin_path) else bin_path
+    except OSError:
+        cache_key = bin_path
+
+    if cache_key in _SLASH_FILTER_SUPPORT_CACHE:
+        return _SLASH_FILTER_SUPPORT_CACHE[cache_key]
+
+    try:
+        res = subprocess.run(
+            [bin_path, "-version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            **subprocess_hidden_kwargs(),
+        )
+        text = f"{res.stdout or ''}\n{res.stderr or ''}"
+    except Exception:
+        return False
+
+    supported = False
+    m_lavfi = re.search(r"libavfilter\s+(\d+)\.", text)
+    if m_lavfi and int(m_lavfi.group(1)) >= 10:
+        supported = True
+    else:
+        m_ver = re.search(r"ffmpeg\s+version\s+n?(\d+)\.", text, re.IGNORECASE)
+        if m_ver and int(m_ver.group(1)) >= 7:
+            supported = True
+        elif re.search(r"ffmpeg\s+version\s+N-", text):
+            supported = True
+
+    _SLASH_FILTER_SUPPORT_CACHE[cache_key] = supported
+    return supported
 
 
 class FFmpegProbe:
@@ -478,12 +521,16 @@ class FFmpegEngine:
         stderr_thread: Optional[threading.Thread] = None
 
         try:
-            cmd = [get_ffmpeg_path(), "-y", "-nostdin", "-i", input_video]
+            ffmpeg_bin = get_ffmpeg_path()
+            use_slash = supports_slash_filter_option(ffmpeg_bin)
+            cmd = [ffmpeg_bin, "-y", "-nostdin", "-i", input_video]
 
             if is_complex:
-                cmd.extend(["-filter_complex_script", filter_script_path, "-map", "0:v:0?", "-map", "[aout]"])
+                complex_opt = "-/filter_complex" if use_slash else "-filter_complex_script"
+                cmd.extend([complex_opt, filter_script_path, "-map", "0:v:0?", "-map", "[aout]"])
             else:
-                cmd.extend(["-filter_script:a", filter_script_path, "-map", "0:v:0?", "-map", "0:a:0"])
+                audio_opt = "-/filter:a" if use_slash else "-filter_script:a"
+                cmd.extend([audio_opt, filter_script_path, "-map", "0:v:0?", "-map", "0:a:0"])
 
             # Copy video stream losslessly; only add hvc1 tag for non-tagged HEVC in MP4/MOV containers
             cmd.extend(["-strict", "unofficial", "-c:v", "copy"])
