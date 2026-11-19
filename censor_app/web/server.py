@@ -1,5 +1,6 @@
 import os
 import sys
+import errno
 import json
 import hashlib
 import mimetypes
@@ -7,7 +8,7 @@ import subprocess
 import tempfile
 import threading
 from pathlib import Path
-from typing import Optional, Dict, Any, Set
+from typing import Optional, Dict, Any, Set, List
 from http import HTTPStatus
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
@@ -29,7 +30,17 @@ from censor_app.core.subtitle_fetcher import (
     parse_media_query,
 )
 
-STATIC_DIR = Path(__file__).parent / "static"
+def _resolve_static_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            frozen_static = Path(meipass) / "censor_app" / "web" / "static"
+            if frozen_static.exists():
+                return frozen_static
+    return Path(__file__).resolve().parent / "static"
+
+
+STATIC_DIR = _resolve_static_dir()
 UPLOAD_DIR = Path.home() / ".cache" / "censor_app" / "uploads"
 
 ALLOWED_VIDEO_EXTENSIONS: Set[str] = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
@@ -84,6 +95,30 @@ def resolve_file_path(path_str: str) -> Optional[str]:
             continue
 
     return None
+
+
+def _normalize_custom_words(raw_words: Any) -> List[str]:
+    if isinstance(raw_words, str):
+        return [w.strip() for w in raw_words.split(",") if w.strip()]
+    if isinstance(raw_words, list):
+        return [str(w).strip() for w in raw_words if str(w).strip()]
+    return []
+
+
+def _default_export_dir_for_upload() -> Path:
+    for cand in (
+        Path.home() / "Movies",
+        Path.home() / "Videos",
+        Path.home() / "Downloads",
+        Path.home(),
+    ):
+        try:
+            if cand.exists() and cand.is_dir():
+                return cand
+        except OSError:
+            continue
+    return Path.cwd()
+
 
 class StudioRequestHandler(BaseHTTPRequestHandler):
     server_version = "CensorAppStudio/1.0"
@@ -178,6 +213,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self.handle_get_progress()
         elif path == "/api/config":
             self.handle_get_config()
+        elif path == "/api/health":
+            self.handle_health()
         elif path == "/api/stream":
             self.handle_stream_media(query)
         elif path == "/api/browse":
@@ -219,6 +256,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self.handle_subtitle_search(payload)
         elif path == "/api/subtitles/download":
             self.handle_subtitle_download(payload)
+        elif path == "/api/shutdown":
+            self.handle_shutdown()
         else:
             self.send_error(HTTPStatus.NOT_FOUND, "Endpoint not found")
 
@@ -283,6 +322,18 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
     def handle_get_config(self):
         config = Config()
         self.send_json_response(self._public_config_dict(config))
+
+    def handle_health(self):
+        deps = FFmpegProbe.check_dependencies()
+        self.send_json_response({
+            "status": "ok",
+            "platform": sys.platform,
+            "ffmpeg": deps["ffmpeg"],
+            "ffprobe": deps["ffprobe"],
+            "bundled": deps["bundled"],
+            "ffmpeg_ok": deps["ok"],
+            "install_hint": deps["install_hint"],
+        })
 
     def handle_save_config(self, payload: dict):
         config = Config()
@@ -439,6 +490,23 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             current_job["error"] = "Cancelled by user"
         self.send_json_response({"status": "cancelled"})
 
+    def handle_shutdown(self):
+        global active_engine, active_job_id
+        with job_lock:
+            active_job_id += 1
+            if active_engine:
+                active_engine.cancel()
+            active_engine = None
+            if current_job.get("status") == "processing":
+                current_job["status"] = "idle"
+                current_job["error"] = "Stopped by user"
+
+        self.send_json_response({"status": "shutting_down"})
+        if hasattr(self.server, "shutdown"):
+            timer = threading.Timer(0.15, self.server.shutdown)
+            timer.daemon = True
+            timer.start()
+
     def handle_reveal(self, payload: dict):
         path_str = payload.get("path", "")
         if path_str and os.path.exists(path_str):
@@ -478,12 +546,19 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         except Exception as e:
             items = []
 
-        bookmarks = [
-            {"name": "Home", "path": str(Path.home())},
-            {"name": "Downloads", "path": str(Path.home() / "Downloads")},
-            {"name": "Movies", "path": str(Path.home() / "Movies")},
-            {"name": "Workspace", "path": str(Path.cwd())}
-        ]
+        bookmarks = [{"name": "Home", "path": str(Path.home())}]
+        for bm_name, bm_path in (
+            ("Downloads", Path.home() / "Downloads"),
+            ("Movies", Path.home() / "Movies"),
+            ("Videos", Path.home() / "Videos"),
+            ("Desktop", Path.home() / "Desktop"),
+        ):
+            try:
+                if bm_path.exists() and bm_path.is_dir():
+                    bookmarks.append({"name": bm_name, "path": str(bm_path)})
+            except OSError:
+                continue
+        bookmarks.append({"name": "Workspace", "path": str(Path.cwd())})
 
         self.send_json_response({
             "current_dir": str(dir_path),
@@ -496,7 +571,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         video_path = payload.get("video_path", "").strip()
         srt_path = payload.get("srt_path", "").strip()
         preset = payload.get("preset", "moderate")
-        custom_words = payload.get("custom_words", [])
+        custom_words = _normalize_custom_words(payload.get("custom_words", []))
         timing_mode = payload.get("timing_mode", "word")
         pad_before = float(payload.get("padding_before", 0.18))
         pad_after = float(payload.get("padding_after", 0.16))
@@ -510,10 +585,17 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         resolved_video = resolve_file_path(video_path)
         if not resolved_video:
             self.send_json_response({
-                "error": f"Video file '{video_path}' could not be found. Please use the Browse (📁) button or ensure the file upload has finished."
+                "error": f"Video file '{video_path}' could not be found. Please use the Browse button or ensure the file upload has finished."
             }, status=HTTPStatus.BAD_REQUEST)
             return
         video_path = resolved_video
+
+        deps = FFmpegProbe.check_dependencies()
+        if not deps["ok"]:
+            self.send_json_response({
+                "error": f"FFmpeg / ffprobe is required but was not found on your system. Install it with: {deps['install_hint']}"
+            }, status=HTTPStatus.BAD_REQUEST)
+            return
 
         resolved_srt = resolve_file_path(srt_path)
         if resolved_srt:
@@ -595,15 +677,22 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 audio_refine=audio_refine,
             )
 
-            # Auto suggest output path alongside video
+            # Auto suggest output path alongside video (or visible folder for uploaded videos)
             v_p = Path(video_path)
-            default_output = str(v_p.parent / f"{v_p.stem}.Cleaned{v_p.suffix}")
+            is_uploaded = False
+            try:
+                is_uploaded = v_p.resolve().parent == UPLOAD_DIR.resolve()
+            except OSError:
+                is_uploaded = False
+            export_dir = _default_export_dir_for_upload() if is_uploaded else v_p.parent
+            default_output = str(export_dir / f"{v_p.stem}.Cleaned{v_p.suffix}")
 
             self.send_json_response({
                 "video_path": video_path,
                 "srt_path": active_srt,
                 "subtitle_downloaded": subtitle_downloaded,
                 "subtitle_provider": subtitle_provider,
+                "is_uploaded": is_uploaded,
                 "suggested_output": default_output,
                 "duration": media_info.get("duration", 0.0),
                 "is_surround": media_info.get("is_surround", False),
@@ -617,16 +706,24 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
 
     def handle_process(self, payload: dict):
         global active_engine, active_job_id
-        video_path = payload.get("video_path")
+        raw_video_path = (payload.get("video_path") or "").strip()
         output_path = payload.get("output_path")
-        srt_path = payload.get("srt_path")
+        raw_srt_path = (payload.get("srt_path") or "").strip()
         mode = payload.get("mode", "mute")
         preset = payload.get("preset", "moderate")
-        custom_words = payload.get("custom_words", [])
+        custom_words = _normalize_custom_words(payload.get("custom_words", []))
         center_channel_only = payload.get("center_channel_only", True)
         generate_srt = payload.get("generate_clean_srt", True)
         detections_data = payload.get("detections", [])
 
+        deps = FFmpegProbe.check_dependencies()
+        if not deps["ok"]:
+            self.send_json_response({
+                "error": f"FFmpeg / ffprobe is required but was not found on your system. Install it with: {deps['install_hint']}"
+            }, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        video_path = resolve_file_path(raw_video_path) if raw_video_path else None
         if not video_path or not os.path.exists(video_path):
             self.send_json_response({"error": "Invalid video path"}, status=HTTPStatus.BAD_REQUEST)
             return
@@ -634,7 +731,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         if not output_path or not isinstance(output_path, str) or not output_path.strip():
             self.send_json_response({"error": "Invalid output path"}, status=HTTPStatus.BAD_REQUEST)
             return
-        output_path = output_path.strip()
+        output_path = str(Path(output_path.strip()).expanduser())
+        srt_path = resolve_file_path(raw_srt_path) if raw_srt_path else ""
         out_p = Path(output_path)
         if out_p.suffix.lower() not in ALLOWED_VIDEO_EXTENSIONS:
             self.send_json_response({
@@ -914,6 +1012,21 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def run_studio_server(host: str = "127.0.0.1", port: int = 8000) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((host, port), StudioRequestHandler)
-    return server
+class StudioHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+
+def run_studio_server(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    max_port_attempts: int = 20,
+) -> ThreadingHTTPServer:
+    for offset in range(max_port_attempts):
+        candidate_port = port + offset
+        try:
+            return StudioHTTPServer((host, candidate_port), StudioRequestHandler)
+        except OSError as e:
+            if e.errno == errno.EADDRINUSE and offset < max_port_attempts - 1:
+                continue
+            raise
+    raise RuntimeError(f"Unable to bind server on {host}:{port}-{port + max_port_attempts - 1}")

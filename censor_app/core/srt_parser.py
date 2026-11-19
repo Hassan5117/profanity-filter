@@ -6,6 +6,12 @@ import tempfile
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Any
 
+from censor_app.core.ffmpeg_engine import (
+    get_ffmpeg_path,
+    get_ffprobe_path,
+    subprocess_hidden_kwargs,
+)
+
 @dataclass
 class SubtitleItem:
     index: int
@@ -192,7 +198,7 @@ def probe_subtitle_streams(video_path: str, text_only: bool = False) -> List[Dic
     Returns list of dicts with stream index, sub_index, codec, language, title, is_text.
     """
     cmd = [
-        "ffprobe",
+        get_ffprobe_path(),
         "-v", "error",
         "-select_streams", "s",
         "-show_entries", "stream=index,codec_name:stream_tags=language,title",
@@ -200,7 +206,14 @@ def probe_subtitle_streams(video_path: str, text_only: bool = False) -> List[Dic
         video_path
     ]
     try:
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+            **subprocess_hidden_kwargs(),
+        )
         import json
         data = json.loads(res.stdout)
         streams = []
@@ -235,14 +248,20 @@ def extract_embedded_subtitle(video_path: str, stream_index: Optional[int] = Non
 
     stream_selector = f"0:s:{stream_index}" if stream_index is not None else "0:s:0"
     cmd = [
-        "ffmpeg",
+        get_ffmpeg_path(),
         "-y",
         "-i", video_path,
         "-map", stream_selector,
         "-c:s", "srt",
         output_path
     ]
-    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    res = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **subprocess_hidden_kwargs(),
+    )
     if res.returncode != 0:
         if os.path.exists(output_path):
             try:

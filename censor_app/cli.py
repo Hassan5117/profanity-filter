@@ -1,6 +1,8 @@
 import os
+import signal
 import sys
 import argparse
+import threading
 import webbrowser
 from pathlib import Path
 
@@ -235,21 +237,43 @@ def run_watch_command(args):
 
 def run_studio_command(args):
     from censor_app.web.server import run_studio_server
+    deps = FFmpegProbe.check_dependencies()
+    if not deps["ok"]:
+        print(
+            f"[Warning] FFmpeg / ffprobe not found in PATH. "
+            f"Install it before scanning/exporting: {deps['install_hint']}"
+        )
     port = args.port
     host = args.host
     server = run_studio_server(host=host, port=port)
-    url = f"http://{host}:{port}"
+    actual_port = server.server_port
+    if actual_port != port:
+        print(f"[Info] Port {port} was busy; using port {actual_port} instead.")
+    url = f"http://{host}:{actual_port}"
     print(f"\n=======================================================")
     print(f"🎬 Movie Censor Studio running at: {url}")
-    print(f"Press Ctrl+C to stop the server.")
+    print(f"Close this window or click Stop Studio in the browser to quit.")
     print(f"=======================================================\n")
+
+    def _handle_sigterm(_signum, _frame):
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    try:
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+    except (ValueError, OSError, AttributeError):
+        pass
+
     if not args.no_browser:
-        webbrowser.open(url)
+        timer = threading.Timer(0.35, webbrowser.open, args=[url])
+        timer.daemon = True
+        timer.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down Studio server...")
         server.shutdown()
+    finally:
+        server.server_close()
 
 
 def run_subtitles_command(args):

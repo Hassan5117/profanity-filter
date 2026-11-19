@@ -1,6 +1,8 @@
 import os
 import json
+import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from collections import deque
@@ -8,12 +10,99 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Callable, Dict, Any
 
 
+def subprocess_hidden_kwargs() -> Dict[str, Any]:
+    """Suppress transient console windows when spawning helper executables on Windows."""
+    if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
+def resolve_media_binary(name: str) -> Optional[str]:
+    """Locate ffmpeg/ffprobe across env override, PyInstaller bundle, PATH, and standard macOS paths."""
+    exe_name = f"{name}.exe" if sys.platform == "win32" else name
+    env_override = (os.environ.get(f"CENSOR_{name.upper()}_PATH") or "").strip()
+    if env_override:
+        cand = Path(env_override).expanduser()
+        if cand.exists() and cand.is_file():
+            return str(cand)
+
+    if getattr(sys, "frozen", False):
+        bundle_candidates: List[Path] = []
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            mp_dir = Path(meipass)
+            bundle_candidates.extend([mp_dir / "bin" / exe_name, mp_dir / exe_name])
+        exe_dir = Path(sys.executable).resolve().parent
+        bundle_candidates.extend([
+            exe_dir / "bin" / exe_name,
+            exe_dir / exe_name,
+            exe_dir.parent / "Resources" / "bin" / exe_name,
+            exe_dir.parent / "Resources" / exe_name,
+        ])
+        for cand in bundle_candidates:
+            try:
+                if cand.exists() and cand.is_file():
+                    return str(cand)
+            except OSError:
+                continue
+
+    which_hit = shutil.which(name)
+    if which_hit:
+        return which_hit
+
+    if sys.platform == "darwin":
+        for mac_dir in (Path("/opt/homebrew/bin"), Path("/usr/local/bin")):
+            cand = mac_dir / name
+            if cand.exists() and cand.is_file():
+                return str(cand)
+
+    return None
+
+
+def is_bundled_binary(binary_path: Optional[str]) -> bool:
+    """Return True if binary_path points inside the active PyInstaller bundle."""
+    if not binary_path or not getattr(sys, "frozen", False):
+        return False
+    try:
+        resolved = Path(binary_path).resolve()
+    except OSError:
+        return False
+
+    bundle_roots: List[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        try:
+            bundle_roots.append(Path(meipass).resolve())
+        except OSError:
+            pass
+    try:
+        exe_dir = Path(sys.executable).resolve().parent
+        bundle_roots.append(exe_dir)
+        if exe_dir.name == "MacOS" and exe_dir.parent.name == "Contents":
+            bundle_roots.append(exe_dir.parent)
+    except OSError:
+        pass
+
+    for root in bundle_roots:
+        if resolved == root or root in resolved.parents:
+            return True
+    return False
+
+
+def get_ffmpeg_path() -> str:
+    return resolve_media_binary("ffmpeg") or "ffmpeg"
+
+
+def get_ffprobe_path() -> str:
+    return resolve_media_binary("ffprobe") or "ffprobe"
+
+
 class FFmpegProbe:
     @staticmethod
     def probe_media(file_path: str) -> Dict[str, Any]:
         """Probe media file and extract duration, audio layout, and stream info."""
         cmd = [
-            "ffprobe",
+            get_ffprobe_path(),
             "-v", "error",
             "-show_entries",
             "format=duration,size,bit_rate:stream=index,codec_type,codec_name,codec_tag_string,channels,channel_layout,sample_rate,width,height,disposition",
@@ -21,7 +110,14 @@ class FFmpegProbe:
             file_path
         ]
         try:
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            res = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+                **subprocess_hidden_kwargs(),
+            )
             data = json.loads(res.stdout)
 
             duration = 0.0
@@ -90,6 +186,27 @@ class FFmpegProbe:
                 "is_surround": False,
                 "error": str(e)
             }
+
+    @staticmethod
+    def check_dependencies() -> Dict[str, Any]:
+        """Check availability of bundled or system ffmpeg and ffprobe executables."""
+        ffmpeg_path = resolve_media_binary("ffmpeg")
+        ffprobe_path = resolve_media_binary("ffprobe")
+        if sys.platform == "darwin":
+            install_hint = "brew install ffmpeg"
+        elif sys.platform == "win32":
+            install_hint = "winget install Gyan.FFmpeg"
+        else:
+            install_hint = "sudo apt install ffmpeg"
+        return {
+            "ffmpeg": bool(ffmpeg_path),
+            "ffprobe": bool(ffprobe_path),
+            "ffmpeg_path": ffmpeg_path,
+            "ffprobe_path": ffprobe_path,
+            "bundled": is_bundled_binary(ffmpeg_path) and is_bundled_binary(ffprobe_path),
+            "ok": bool(ffmpeg_path and ffprobe_path),
+            "install_hint": install_hint,
+        }
 
 
 class AudioFilterBuilder:
@@ -313,8 +430,14 @@ class FFmpegEngine:
 
         if not intervals:
             try:
-                cmd = ["ffmpeg", "-y", "-nostdin", "-i", input_video, "-c", "copy", temp_output]
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                cmd = [get_ffmpeg_path(), "-y", "-nostdin", "-i", input_video, "-c", "copy", temp_output]
+                res = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    **subprocess_hidden_kwargs(),
+                )
                 success = (res.returncode == 0) and not self._is_cancelled
                 if success:
                     os.replace(temp_output, str(out_path))
@@ -355,7 +478,7 @@ class FFmpegEngine:
         stderr_thread: Optional[threading.Thread] = None
 
         try:
-            cmd = ["ffmpeg", "-y", "-nostdin", "-i", input_video]
+            cmd = [get_ffmpeg_path(), "-y", "-nostdin", "-i", input_video]
 
             if is_complex:
                 cmd.extend(["-filter_complex_script", filter_script_path, "-map", "0:v:0?", "-map", "[aout]"])
@@ -390,7 +513,8 @@ class FFmpegEngine:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                bufsize=1
+                bufsize=1,
+                **subprocess_hidden_kwargs(),
             )
 
             def _drain_stderr(pipe):

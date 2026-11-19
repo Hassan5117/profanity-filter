@@ -6,7 +6,11 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from censor_app.core.ffmpeg_engine import FFmpegProbe
+from censor_app.core.ffmpeg_engine import (
+    FFmpegProbe,
+    get_ffmpeg_path,
+    subprocess_hidden_kwargs,
+)
 
 SAMPLE_RATE = 8000
 FRAME_SAMPLES = 80
@@ -83,7 +87,7 @@ def _decode_spans(
         if e <= s + 0.05:
             continue
         cmd = [
-            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+            get_ffmpeg_path(), "-nostdin", "-hide_banner", "-loglevel", "error",
             "-ss", f"{s:.3f}", "-to", f"{e:.3f}",
             "-i", video_path,
             "-vn", "-sn", "-dn",
@@ -98,6 +102,7 @@ def _decode_spans(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=30,
+                **subprocess_hidden_kwargs(),
             )
             if res.returncode != 0:
                 any_failed = True

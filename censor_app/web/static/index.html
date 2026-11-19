@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
   <title>Movie Censor Studio - Profanity Muter</title>
   <link rel="stylesheet" href="/style.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -37,8 +38,13 @@
             <option value="mild">All Profanities (Includes Damn, Hell, Crap)</option>
           </select>
         </div>
+        <button type="button" id="stopStudioBtn" class="btn-secondary btn-sm stop-studio-btn" title="Stop the local Movie Censor Studio server">⏻ Stop Studio</button>
       </div>
     </header>
+
+    <div id="ffmpegWarningBanner" class="alert-banner alert-warning hidden" role="alert">
+      <strong>FFmpeg not detected:</strong> <span id="ffmpegWarningText"></span>
+    </div>
 
     <!-- Source Selection Card -->
     <section class="card input-card">
@@ -48,12 +54,12 @@
           <label for="videoPathInput">Video File (MP4, MKV, MOV, WebM):</label>
           <div class="input-with-browse">
             <input type="text" id="videoPathInput" name="video_path" placeholder="/path/to/movie.mp4 or drop file" />
-            <button id="browseVideoBtn" class="btn-secondary" title="Pick from folder on Mac">📁 Browse...</button>
-            <button id="pickVideoFileBtn" class="btn-secondary" title="Upload from computer">⬆ Upload</button>
+            <button type="button" id="browseVideoBtn" class="btn-primary btn-sm" title="Browse local files (recommended — instant, no copying)">📁 Browse...</button>
+            <button type="button" id="pickVideoFileBtn" class="btn-secondary btn-sm" title="Upload from computer">⬆ Upload</button>
             <input type="file" id="videoFileInput" accept="video/*,.mkv,.mp4,.mov,.avi,.webm,.m4v" style="display: none;" />
           </div>
           <div id="videoDropZone" class="drop-zone">
-            <span>Drag & drop movie file here, or click to upload</span>
+            <span>Or drag &amp; drop / click to upload a video (tip: use Browse above for instant zero-copy access to large movies)</span>
             <div id="videoUploadProgress" class="upload-progress-box hidden">
               <div id="videoUploadFill" class="upload-progress-fill" style="width: 0%"></div>
               <span id="videoUploadText" class="upload-progress-text">Uploading: 0%</span>
@@ -65,13 +71,13 @@
           <label for="srtPathInput">Subtitles (SRT, VTT, or embedded):</label>
           <div class="input-with-browse">
             <input type="text" id="srtPathInput" name="srt_path" placeholder="Auto-detected, embedded, or fetched online if left empty" />
-            <button type="button" id="browseSrtBtn" class="btn-secondary" title="Pick from folder on Mac">📁 Browse...</button>
-            <button type="button" id="pickSrtFileBtn" class="btn-secondary" title="Upload from computer">⬆ Upload</button>
-            <button type="button" id="searchOnlineSubsBtn" class="btn-secondary" title="Search trusted subtitle providers online">🌐 Search Online...</button>
+            <button type="button" id="browseSrtBtn" class="btn-secondary btn-sm" title="Browse local subtitle files">📁 Browse...</button>
+            <button type="button" id="pickSrtFileBtn" class="btn-secondary btn-sm" title="Upload from computer">⬆ Upload</button>
+            <button type="button" id="searchOnlineSubsBtn" class="btn-secondary btn-sm" title="Search trusted subtitle providers online">🌐 Search Online...</button>
             <input type="file" id="srtFileInput" accept=".srt,.vtt" style="display: none;" />
           </div>
           <div id="srtDropZone" class="drop-zone">
-            <span>Drag & drop .srt file here (optional)</span>
+            <span>Drag &amp; drop .srt file here (optional)</span>
             <div id="srtUploadProgress" class="upload-progress-box hidden">
               <div id="srtUploadFill" class="upload-progress-fill" style="width: 0%"></div>
               <span id="srtUploadText" class="upload-progress-text">Uploading: 0%</span>
@@ -108,13 +114,21 @@
             <button type="button" id="syncPlusHalfBtn" class="btn-xs" title="Nudge subtitles 0.5s later">+0.5s</button>
           </div>
         </div>
+        <div class="control-group control-group-wide">
+          <label for="customWordsInput">Custom Words (Optional)</label>
+          <input type="text" id="customWordsInput" name="custom_words" placeholder="e.g. darn, heck (comma-separated)" />
+        </div>
       </div>
 
       <div class="scan-actions">
-        <button id="scanBtn" class="btn-primary">
+        <button type="button" id="scanBtn" class="btn-primary">
           <span class="btn-icon">⚡</span> Scan for Profanity
         </button>
         <span id="scanStatusText" class="status-msg"></span>
+      </div>
+      <div id="scanErrorBanner" class="alert-banner alert-error hidden" role="alert">
+        <span id="scanErrorText"></span>
+        <button type="button" id="scanErrorSearchSubsBtn" class="btn-secondary btn-sm hidden">🌐 Search Online...</button>
       </div>
     </section>
 
@@ -152,8 +166,11 @@
           <div class="video-wrapper">
             <video id="previewPlayer" controls preload="metadata"></video>
           </div>
+          <div id="playerCompatNotice" class="player-notice hidden" role="status">
+            Browser preview cannot decode this video/audio format natively (common with .mkv or 5.1 surround), but Censor &amp; Export Media will still process it cleanly with FFmpeg.
+          </div>
           <div class="player-controls">
-            <button id="playSelectedBtn" class="btn-secondary">▶ Preview Selected Word Clip</button>
+            <button type="button" id="playSelectedBtn" class="btn-secondary">▶ Preview Selected Word Clip</button>
             <span id="playerTimecode" class="timecode-display">00:00:00</span>
           </div>
         </div>
@@ -163,19 +180,19 @@
           <div class="table-header-row">
             <div class="card-title">Detected Profanities (<span id="activeCount">0</span> selected)</div>
             <div class="table-actions">
-              <button id="selectAllBtn" class="btn-xs">Select All</button>
-              <button id="deselectAllBtn" class="btn-xs">Deselect All</button>
+              <button type="button" id="selectAllBtn" class="btn-xs">Select All</button>
+              <button type="button" id="deselectAllBtn" class="btn-xs">Deselect All</button>
             </div>
           </div>
 
           <div class="filter-toolbar">
             <input type="text" id="tableFilterInput" placeholder="Filter text or words..." class="filter-input" />
             <div class="tier-pills">
-              <button class="pill active" data-filter="all">All</button>
-              <button class="pill" data-filter="strict">Strict</button>
-              <button class="pill" data-filter="moderate">Moderate</button>
-              <button class="pill" data-filter="mild">Mild</button>
-              <button class="pill" data-filter="custom">Custom</button>
+              <button type="button" class="pill active" data-filter="all">All</button>
+              <button type="button" class="pill" data-filter="strict">Strict</button>
+              <button type="button" class="pill" data-filter="moderate">Moderate</button>
+              <button type="button" class="pill" data-filter="mild">Mild</button>
+              <button type="button" class="pill" data-filter="custom">Custom</button>
             </div>
           </div>
 
@@ -224,57 +241,55 @@
         </div>
 
         <div class="render-actions">
-          <button id="startProcessBtn" class="btn-render">
-            🚀 Censor & Export Media (<span id="renderBtnCount">0</span> words)
+          <button type="button" id="startProcessBtn" class="btn-render">
+            🚀 Censor &amp; Export Media (<span id="renderBtnCount">0</span> words)
           </button>
         </div>
       </section>
     </main>
 
-    <!-- File Browser Modal -->
-    <div id="browserModal" class="modal hidden">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h3>Browse Local Files</h3>
-          <button id="closeBrowserBtn" class="modal-close">&times;</button>
-        </div>
-        <div id="browserBookmarks" class="browser-bookmarks"></div>
-        <div class="browser-path-nav">
-          <button id="browserUpBtn" class="btn-xs">⬆ Up</button>
-          <span id="browserCurrentPath" class="browser-path-text"></span>
-        </div>
-        <div id="browserList" class="browser-list"></div>
+    <!-- File Browser Dialog -->
+    <dialog id="browserModal" class="studio-dialog browser-dialog" closedby="any" aria-labelledby="browserDialogTitle">
+      <div class="sub-dialog-header">
+        <h2 id="browserDialogTitle">Browse Local Files</h2>
+        <form method="dialog">
+          <button type="submit" id="closeBrowserBtn" class="btn-close" aria-label="Close file browser">&times;</button>
+        </form>
       </div>
-    </div>
-
-    <!-- Progress Modal -->
-    <div id="progressModal" class="modal hidden">
-      <div class="modal-content progress-modal-content">
-        <h3 id="progressTitle">Censoring Media...</h3>
-        <p id="progressSubtitle" class="subtitle">Losslessly copying video stream & processing audio...</p>
-        
-        <div class="progress-bar-container">
-          <div id="progressBar" class="progress-bar-fill" style="width: 0%"></div>
-        </div>
-
-        <div class="progress-metrics">
-          <span id="progressPercent">0.0%</span>
-          <span id="progressTime">00:00 / 00:00</span>
-        </div>
-
-        <div id="progressCompletionActions" class="completion-actions hidden">
-          <button id="revealFinderBtn" class="btn-primary">📂 Reveal in Finder</button>
-          <button id="previewCleanedBtn" class="btn-secondary">▶ Play Cleaned Clip</button>
-          <button id="closeProgressBtn" class="btn-secondary">Done</button>
-        </div>
-
-        <div id="progressErrorMsg" class="error-msg hidden"></div>
-        <button id="cancelProcessBtn" class="btn-danger">Cancel Processing</button>
+      <div id="browserBookmarks" class="browser-bookmarks"></div>
+      <div class="browser-path-nav">
+        <button type="button" id="browserUpBtn" class="btn-xs">⬆ Up</button>
+        <span id="browserCurrentPath" class="browser-path-text"></span>
       </div>
-    </div>
+      <div id="browserList" class="browser-list"></div>
+    </dialog>
+
+    <!-- Progress Dialog -->
+    <dialog id="progressModal" class="studio-dialog progress-dialog" closedby="none" aria-labelledby="progressTitle">
+      <h2 id="progressTitle">Censoring Media...</h2>
+      <p id="progressSubtitle" class="subtitle">Losslessly copying video stream &amp; processing audio...</p>
+      
+      <div class="progress-bar-container">
+        <div id="progressBar" class="progress-bar-fill" style="width: 0%"></div>
+      </div>
+
+      <div class="progress-metrics">
+        <span id="progressPercent">0.0%</span>
+        <span id="progressTime">00:00 / 00:00</span>
+      </div>
+
+      <div id="progressCompletionActions" class="completion-actions hidden">
+        <button type="button" id="revealFinderBtn" class="btn-primary">📂 Show in Folder</button>
+        <button type="button" id="previewCleanedBtn" class="btn-secondary">▶ Play Cleaned Clip</button>
+        <button type="button" id="closeProgressBtn" class="btn-secondary">Done</button>
+      </div>
+
+      <div id="progressErrorMsg" class="error-msg hidden"></div>
+      <button type="button" id="cancelProcessBtn" class="btn-danger">Cancel Processing</button>
+    </dialog>
 
     <!-- Trusted Online Subtitle Search Dialog -->
-    <dialog id="subtitleSearchDialog" class="sub-dialog" closedby="any" aria-labelledby="subtitleDialogTitle">
+    <dialog id="subtitleSearchDialog" class="studio-dialog sub-dialog" closedby="any" aria-labelledby="subtitleDialogTitle">
       <div class="sub-dialog-header">
         <h2 id="subtitleDialogTitle">Search Trusted Subtitles</h2>
         <form method="dialog">

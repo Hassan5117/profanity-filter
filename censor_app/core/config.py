@@ -1,8 +1,9 @@
 import json
 import os
 import re
+import sys
 from pathlib import Path
-from typing import Dict, Any, Optional, Set
+from typing import Dict, Any, List, Optional, Set
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "mode": "mute",  # "mute", "bleep", "duck"
@@ -118,6 +119,38 @@ def parse_dotenv_file(env_path: Path) -> Dict[str, str]:
     return parsed
 
 
+def _default_env_candidates() -> List[Path]:
+    """Return candidate .env paths in increasing precedence order."""
+    raw_candidates: List[Path] = [CONFIG_DIR / ".env"]
+    if getattr(sys, "frozen", False):
+        try:
+            exe_dir = Path(sys.executable).resolve().parent
+            if exe_dir.name == "MacOS" and exe_dir.parent.name == "Contents":
+                raw_candidates.append(exe_dir.parent.parent.parent / ".env")
+            raw_candidates.append(exe_dir / ".env")
+        except OSError:
+            pass
+    else:
+        raw_candidates.append(DEFAULT_ENV_FILE)
+
+    try:
+        raw_candidates.append(Path.cwd() / ".env")
+    except OSError:
+        pass
+
+    unique: List[Path] = []
+    seen: Set[Path] = set()
+    for cand in raw_candidates:
+        try:
+            resolved = cand.resolve()
+        except OSError:
+            resolved = cand
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append(cand)
+    return unique
+
+
 class Config:
     def __init__(
         self,
@@ -155,14 +188,7 @@ class Config:
                 if v.strip():
                     dotenv_vals[k] = v.strip()
         else:
-            candidates = [DEFAULT_ENV_FILE]
-            try:
-                cwd_env = Path.cwd() / ".env"
-                if cwd_env.resolve() != DEFAULT_ENV_FILE.resolve():
-                    candidates.append(cwd_env)
-            except OSError:
-                pass
-            for candidate in candidates:
+            for candidate in _default_env_candidates():
                 for k, v in parse_dotenv_file(candidate).items():
                     if v.strip():
                         dotenv_vals[k] = v.strip()

@@ -7,15 +7,27 @@ document.addEventListener('DOMContentLoaded', () => {
   let currentMediaDuration = 0;
   let selectedDetection = null;
   let activeMuteChecker = null;
+  let activeUploads = 0;
+  let lastScannedVideoPath = '';
+  let isProcessingJob = false;
+  let syncRescanTimer = null;
 
   // DOM Elements
+  const ffmpegWarningBanner = document.getElementById('ffmpegWarningBanner');
+  const ffmpegWarningText = document.getElementById('ffmpegWarningText');
   const videoPathInput = document.getElementById('videoPathInput');
   const srtPathInput = document.getElementById('srtPathInput');
   const modeSelect = document.getElementById('modeSelect');
   const presetSelect = document.getElementById('presetSelect');
+  const customWordsInput = document.getElementById('customWordsInput');
   const scanBtn = document.getElementById('scanBtn');
   const scanStatusText = document.getElementById('scanStatusText');
+  const scanErrorBanner = document.getElementById('scanErrorBanner');
+  const scanErrorText = document.getElementById('scanErrorText');
+  const scanErrorSearchSubsBtn = document.getElementById('scanErrorSearchSubsBtn');
   const workspace = document.getElementById('workspace');
+  const playerCompatNotice = document.getElementById('playerCompatNotice');
+  const stopStudioBtn = document.getElementById('stopStudioBtn');
 
   // Stats
   const statDuration = document.getElementById('statDuration');
@@ -108,6 +120,85 @@ document.addEventListener('DOMContentLoaded', () => {
     previewPlayer.muted = false;
   }
 
+  function parseCustomWords() {
+    if (!customWordsInput) return [];
+    return customWordsInput.value
+      .split(',')
+      .map((w) => w.trim())
+      .filter(Boolean);
+  }
+
+  function clearScanError() {
+    if (scanErrorBanner) scanErrorBanner.classList.add('hidden');
+    if (scanErrorText) scanErrorText.textContent = '';
+    if (scanErrorSearchSubsBtn) scanErrorSearchSubsBtn.classList.add('hidden');
+  }
+
+  function showScanError(message, showSearchAction = false) {
+    if (!scanErrorBanner || !scanErrorText) return;
+    scanErrorText.textContent = message;
+    if (scanErrorSearchSubsBtn) {
+      scanErrorSearchSubsBtn.classList.toggle('hidden', !showSearchAction);
+    }
+    scanErrorBanner.classList.remove('hidden');
+  }
+
+  if (scanErrorSearchSubsBtn && searchOnlineSubsBtn) {
+    scanErrorSearchSubsBtn.addEventListener('click', () => {
+      searchOnlineSubsBtn.click();
+    });
+  }
+
+  function playPreviewSafely() {
+    const playPromise = previewPlayer.play();
+    if (playPromise && typeof playPromise.catch === 'function') {
+      playPromise.catch(() => {
+        if (previewPlayer.error && playerCompatNotice) {
+          playerCompatNotice.classList.remove('hidden');
+        }
+      });
+    }
+  }
+
+  function onVideoSelectionChanged() {
+    if (srtPathInput) srtPathInput.value = '';
+    if (subSearchTitle) subSearchTitle.value = '';
+    if (subSearchYear) subSearchYear.value = '';
+    if (subSearchSeason) subSearchSeason.value = '';
+    if (subSearchEpisode) subSearchEpisode.value = '';
+    if (subSearchImdb) subSearchImdb.value = '';
+    clearScanError();
+    if (playerCompatNotice) playerCompatNotice.classList.add('hidden');
+    scanStatusText.textContent = '';
+    detections = [];
+    selectedDetection = null;
+    lastScannedVideoPath = '';
+    clearTestMute();
+    previewPlayer.removeAttribute('src');
+    previewPlayer.load();
+    workspace.classList.add('hidden');
+  }
+
+  function triggerRescanIfActive(debounced = false) {
+    if (workspace.classList.contains('hidden') || !videoPathInput.value.trim() || scanBtn.disabled) {
+      return;
+    }
+    if (syncRescanTimer) {
+      clearTimeout(syncRescanTimer);
+      syncRescanTimer = null;
+    }
+    if (debounced) {
+      syncRescanTimer = setTimeout(() => {
+        syncRescanTimer = null;
+        if (!workspace.classList.contains('hidden') && videoPathInput.value.trim() && !scanBtn.disabled) {
+          scanBtn.click();
+        }
+      }, 350);
+    } else {
+      scanBtn.click();
+    }
+  }
+
   function appendHighlightedContext(container, contextText, word) {
     const text = String(contextText || '');
     const safeWord = String(word || '').trim();
@@ -154,6 +245,20 @@ document.addEventListener('DOMContentLoaded', () => {
     fill.style.width = '0%';
     text.textContent = 'Uploading: 0%';
 
+    activeUploads += 1;
+    scanBtn.disabled = true;
+    scanStatusText.textContent = 'Uploading file...';
+
+    let finished = false;
+    const finishUpload = () => {
+      if (finished) return;
+      finished = true;
+      activeUploads = Math.max(0, activeUploads - 1);
+      if (activeUploads === 0) {
+        scanBtn.disabled = false;
+      }
+    };
+
     const xhr = new XMLHttpRequest();
     const url = `/api/upload?filename=${encodeURIComponent(file.name)}`;
     xhr.open('POST', url, true);
@@ -167,19 +272,37 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     xhr.onload = () => {
+      finishUpload();
       if (xhr.status === 200) {
         const res = JSON.parse(xhr.responseText);
+        if (isVideo) {
+          onVideoSelectionChanged();
+        } else {
+          clearScanError();
+        }
         input.value = res.path;
         fill.style.width = '100%';
         text.textContent = `✓ Uploaded: ${file.name}`;
+        if (activeUploads === 0) {
+          scanStatusText.textContent = isVideo ? 'Upload complete. Click Scan for Profanity.' : 'Subtitle uploaded.';
+        }
         setTimeout(() => progressBox.classList.add('hidden'), 3500);
       } else {
         text.textContent = 'Upload failed';
+        if (activeUploads === 0) scanStatusText.textContent = '';
       }
     };
 
     xhr.onerror = () => {
+      finishUpload();
       text.textContent = 'Upload error';
+      if (activeUploads === 0) scanStatusText.textContent = '';
+    };
+
+    xhr.onabort = () => {
+      finishUpload();
+      text.textContent = 'Upload cancelled';
+      if (activeUploads === 0) scanStatusText.textContent = '';
     };
 
     xhr.send(file);
@@ -203,6 +326,11 @@ document.addEventListener('DOMContentLoaded', () => {
       if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
         const file = e.dataTransfer.files[0];
         if (file.path) {
+          if (isVideo) {
+            onVideoSelectionChanged();
+          } else {
+            clearScanError();
+          }
           inputElement.value = file.path;
         } else {
           uploadFile(file, isVideo);
@@ -220,6 +348,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   setupDropZone(document.getElementById('videoDropZone'), videoPathInput, videoFileInput, true);
   setupDropZone(document.getElementById('srtDropZone'), srtPathInput, srtFileInput, false);
+
+  videoPathInput.addEventListener('change', () => {
+    const currentVal = videoPathInput.value.trim();
+    if (currentVal !== lastScannedVideoPath) {
+      onVideoSelectionChanged();
+    }
+  });
 
   if (pickVideoFileBtn) {
     pickVideoFileBtn.addEventListener('click', () => videoFileInput.click());
@@ -253,18 +388,39 @@ document.addEventListener('DOMContentLoaded', () => {
     let val = parseFloat(syncOffsetInput.value) || 0.0;
     val = Math.round((val + delta) * 10) / 10;
     syncOffsetInput.value = val.toFixed(1);
+    triggerRescanIfActive(true);
   }
   if (syncMinusHalfBtn) syncMinusHalfBtn.addEventListener('click', () => adjustSync(-0.5));
   if (syncMinusTenthBtn) syncMinusTenthBtn.addEventListener('click', () => adjustSync(-0.2));
   if (syncPlusTenthBtn) syncPlusTenthBtn.addEventListener('click', () => adjustSync(+0.2));
   if (syncPlusHalfBtn) syncPlusHalfBtn.addEventListener('click', () => adjustSync(+0.5));
+  if (syncOffsetInput) {
+    syncOffsetInput.addEventListener('input', () => triggerRescanIfActive(true));
+    syncOffsetInput.addEventListener('change', () => triggerRescanIfActive(false));
+  }
+  if (presetSelect) {
+    presetSelect.addEventListener('change', () => triggerRescanIfActive(false));
+  }
+  if (customWordsInput) {
+    customWordsInput.addEventListener('change', () => triggerRescanIfActive(false));
+  }
 
-  // Timecode update and mute listener cleanup in player
+  // Timecode update, error handling, and mute listener cleanup in player
   previewPlayer.addEventListener('timeupdate', () => {
     playerTimecode.textContent = formatSeconds(previewPlayer.currentTime);
   });
   previewPlayer.addEventListener('pause', clearTestMute);
   previewPlayer.addEventListener('ended', clearTestMute);
+  previewPlayer.addEventListener('error', () => {
+    if (previewPlayer.getAttribute('src') && playerCompatNotice) {
+      playerCompatNotice.classList.remove('hidden');
+    }
+  });
+  previewPlayer.addEventListener('loadeddata', () => {
+    if (playerCompatNotice) {
+      playerCompatNotice.classList.add('hidden');
+    }
+  });
 
   if (timingPresetSelect && wordTimingToggle) {
     timingPresetSelect.addEventListener('change', () => {
@@ -291,11 +447,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Scan Media
   scanBtn.addEventListener('click', async () => {
+    clearScanError();
     const videoPath = videoPathInput.value.trim();
     const srtPath = srtPathInput.value.trim();
 
     if (!videoPath) {
-      alert('Please enter or select a video file path.');
+      showScanError('Please select a video file using Browse or Upload first.');
       return;
     }
 
@@ -327,6 +484,7 @@ document.addEventListener('DOMContentLoaded', () => {
           video_path: videoPath,
           srt_path: srtPath,
           preset: presetSelect.value,
+          custom_words: parseCustomWords(),
           timing_mode: timingMode,
           padding_before: padBefore,
           padding_after: padAfter,
@@ -352,6 +510,14 @@ document.addEventListener('DOMContentLoaded', () => {
       currentMediaDuration = data.duration || 0;
       outputVideoInput.value = data.suggested_output || '';
 
+      if (data.video_path) {
+        videoPathInput.value = data.video_path;
+      }
+      lastScannedVideoPath = videoPathInput.value.trim();
+      if (playerCompatNotice) {
+        playerCompatNotice.classList.add('hidden');
+      }
+
       // Update Subtitle input if auto-detected
       if (data.srt_path && !srtPathInput.value) {
         srtPathInput.value = data.srt_path;
@@ -365,22 +531,27 @@ document.addEventListener('DOMContentLoaded', () => {
       centerOnlyToggle.checked = data.is_surround;
 
       // Mount Video Player Stream
-      previewPlayer.src = `/api/stream?path=${encodeURIComponent(videoPath)}`;
+      previewPlayer.src = `/api/stream?path=${encodeURIComponent(lastScannedVideoPath || videoPath)}`;
       previewPlayer.load();
 
       // Show Workspace
       workspace.classList.remove('hidden');
-      scanStatusText.textContent = data.subtitle_downloaded
-        ? `Scan complete: ${detections.length} profanities found (auto-downloaded subtitles from ${data.subtitle_provider}).`
-        : `Scan complete: ${detections.length} profanities found.`;
+      const subNote = data.subtitle_downloaded
+        ? ` (auto-downloaded subtitles from ${data.subtitle_provider})`
+        : '';
+      const exportNote = data.is_uploaded && data.suggested_output
+        ? ` Cleaned export will save to ${data.suggested_output}.`
+        : '';
+      scanStatusText.textContent = `Scan complete: ${detections.length} profanities found${subNote}.${exportNote}`;
 
       renderTable();
       updateCounters();
     } catch (err) {
-      alert(`Scan Error: ${err.message}`);
+      const isSubErr = /(subtitle|srt|vtt)/i.test(err.message);
+      showScanError(err.message, isSubErr);
       scanStatusText.textContent = '';
     } finally {
-      scanBtn.disabled = false;
+      scanBtn.disabled = activeUploads > 0;
     }
   });
 
@@ -443,7 +614,7 @@ document.addEventListener('DOMContentLoaded', () => {
         clearTestMute();
         selectedDetection = d;
         previewPlayer.currentTime = Math.max(0, d.mute_start - 0.5);
-        previewPlayer.play();
+        playPreviewSafely();
         renderTable();
       });
 
@@ -534,7 +705,7 @@ document.addEventListener('DOMContentLoaded', () => {
         clearTestMute();
         selectedDetection = d;
         previewPlayer.currentTime = Math.max(0, d.mute_start - 1.0);
-        previewPlayer.play();
+        playPreviewSafely();
 
         activeMuteChecker = () => {
           if (previewPlayer.paused || previewPlayer.ended) {
@@ -635,18 +806,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (selectedDetection) {
       previewPlayer.currentTime = Math.max(0, selectedDetection.mute_start - 1.0);
-      previewPlayer.play();
+      playPreviewSafely();
     }
   });
 
   // Start Processing
   startProcessBtn.addEventListener('click', async () => {
+    clearScanError();
     const videoPath = videoPathInput.value.trim();
     const outputPath = outputVideoInput.value.trim();
     const srtPath = srtPathInput.value.trim();
 
     if (!outputPath) {
-      alert('Please specify an output video destination.');
+      showScanError('Please specify an output video destination.');
       return;
     }
 
@@ -667,6 +839,7 @@ document.addEventListener('DOMContentLoaded', () => {
           srt_path: srtPath,
           mode: modeSelect.value,
           preset: presetSelect.value,
+          custom_words: parseCustomWords(),
           center_channel_only: centerOnlyToggle.checked,
           generate_clean_srt: cleanSrtToggle.checked,
           detections: detections
@@ -678,8 +851,8 @@ document.addEventListener('DOMContentLoaded', () => {
         throw new Error(data.error || 'Failed to start processing');
       }
 
-      // Show Progress Modal
-      progressModal.classList.remove('hidden');
+      // Show Progress Dialog
+      isProcessingJob = true;
       progressTitle.textContent = 'Censoring Media...';
       progressSubtitle.textContent = 'Losslessly copying video stream & processing audio...';
       progressCompletionActions.classList.add('hidden');
@@ -689,10 +862,13 @@ document.addEventListener('DOMContentLoaded', () => {
       cancelProcessBtn.classList.remove('hidden');
       progressBar.style.width = '0%';
       progressPercent.textContent = '0.0%';
+      if (!progressModal.open) {
+        progressModal.showModal();
+      }
 
       startProgressPolling();
     } catch (err) {
-      alert(`Error starting censorship: ${err.message}`);
+      showScanError(`Error starting censorship: ${err.message}`);
     }
   });
 
@@ -711,6 +887,7 @@ document.addEventListener('DOMContentLoaded', () => {
           progressTime.textContent = `${formatSeconds(data.current_time)} / ${formatSeconds(data.total_duration)}`;
         } else if (data.status === 'completed') {
           clearInterval(pollInterval);
+          isProcessingJob = false;
           progressBar.style.width = '100%';
           progressPercent.textContent = '100%';
           progressTitle.textContent = '🎉 Processing Complete!';
@@ -731,12 +908,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
           previewCleanedBtn.onclick = () => {
             clearTestMute();
-            progressModal.classList.add('hidden');
+            isProcessingJob = false;
+            if (progressModal.open) progressModal.close();
             previewPlayer.src = `/api/stream?path=${encodeURIComponent(data.output_path)}`;
-            previewPlayer.play();
+            playPreviewSafely();
           };
         } else if (data.status === 'failed') {
           clearInterval(pollInterval);
+          isProcessingJob = false;
           progressTitle.textContent = 'Processing Failed';
           progressSubtitle.textContent = data.error || 'An error occurred during FFmpeg execution';
           progressErrorMsg.textContent = data.error || 'Unknown error';
@@ -752,16 +931,24 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 400);
   }
 
+  progressModal.addEventListener('cancel', (e) => {
+    if (isProcessingJob) {
+      e.preventDefault();
+    }
+  });
+
   cancelProcessBtn.addEventListener('click', async () => {
     if (confirm('Cancel video processing?')) {
       await fetch('/api/cancel', { method: 'POST' });
       clearInterval(pollInterval);
-      progressModal.classList.add('hidden');
+      isProcessingJob = false;
+      if (progressModal.open) progressModal.close();
     }
   });
 
   closeProgressBtn.addEventListener('click', () => {
-    progressModal.classList.add('hidden');
+    isProcessingJob = false;
+    if (progressModal.open) progressModal.close();
   });
 
   // Local File Browser
@@ -802,10 +989,15 @@ document.addEventListener('DOMContentLoaded', () => {
           if (item.is_dir) {
             loadBrowserDir(item.path);
           } else {
+            if (browseTargetInput === videoPathInput) {
+              onVideoSelectionChanged();
+            } else {
+              clearScanError();
+            }
             if (browseTargetInput) {
               browseTargetInput.value = item.path;
             }
-            browserModal.classList.add('hidden');
+            if (browserModal.open) browserModal.close();
           }
         });
         browserList.appendChild(div);
@@ -822,18 +1014,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   browseVideoBtn.addEventListener('click', () => {
     browseTargetInput = videoPathInput;
-    browserModal.classList.remove('hidden');
+    if (!browserModal.open) browserModal.showModal();
     loadBrowserDir(browserCurrentDir || '');
   });
 
   browseSrtBtn.addEventListener('click', () => {
     browseTargetInput = srtPathInput;
-    browserModal.classList.remove('hidden');
+    if (!browserModal.open) browserModal.showModal();
     loadBrowserDir(browserCurrentDir || '');
-  });
-
-  closeBrowserBtn.addEventListener('click', () => {
-    browserModal.classList.add('hidden');
   });
 
   // Trusted Online Subtitle Search Dialog
@@ -1023,23 +1211,27 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  if (searchOnlineSubsBtn && subtitleSearchDialog) {
-    // Fallback for browsers without closedby attribute support
-    if (!('closedBy' in HTMLDialogElement.prototype)) {
-      subtitleSearchDialog.addEventListener('click', (event) => {
-        if (event.target !== subtitleSearchDialog) return;
-        const rect = subtitleSearchDialog.getBoundingClientRect();
-        const isDialogContent = (
-          rect.top <= event.clientY &&
-          event.clientY <= rect.top + rect.height &&
-          rect.left <= event.clientX &&
-          event.clientX <= rect.left + rect.width
-        );
-        if (isDialogContent) return;
-        subtitleSearchDialog.close();
+  // Fallback for browsers without closedby attribute support (e.g., Safari)
+  if (!('closedBy' in HTMLDialogElement.prototype)) {
+    const isOutsideDialog = (e, dialog) => {
+      const r = dialog.getBoundingClientRect();
+      return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+    };
+    document.querySelectorAll('dialog[closedby="any"]').forEach((dialog) => {
+      let pressedOutside = false;
+      dialog.addEventListener('pointerdown', (e) => {
+        pressedOutside = isOutsideDialog(e, dialog);
       });
-    }
+      dialog.addEventListener('pointerup', (e) => {
+        if (pressedOutside && isOutsideDialog(e, dialog)) {
+          dialog.close();
+        }
+        pressedOutside = false;
+      });
+    });
+  }
 
+  if (searchOnlineSubsBtn && subtitleSearchDialog) {
     searchOnlineSubsBtn.addEventListener('click', async () => {
       await loadSubtitleConfig();
       subtitleResultsList.textContent = '';
@@ -1094,6 +1286,54 @@ document.addEventListener('DOMContentLoaded', () => {
       } catch (err) {
         subKeysStatus.textContent = `Save error: ${err.message}`;
       }
+    });
+  }
+
+  async function loadHealthStatus() {
+    try {
+      const resp = await fetch('/api/health');
+      if (!resp.ok) return;
+      const health = await resp.json();
+      if (revealFinderBtn) {
+        if (health.platform === 'darwin') {
+          revealFinderBtn.textContent = '📂 Reveal in Finder';
+        } else if (health.platform === 'win32') {
+          revealFinderBtn.textContent = '📂 Show in Explorer';
+        } else {
+          revealFinderBtn.textContent = '📂 Show in Folder';
+        }
+      }
+      if (!health.ffmpeg_ok && ffmpegWarningBanner && ffmpegWarningText) {
+        const hint = health.install_hint ? ` Install it with: ${health.install_hint}` : '';
+        ffmpegWarningText.textContent = `FFmpeg and ffprobe are required to scan and export videos.${hint}`;
+        ffmpegWarningBanner.classList.remove('hidden');
+      }
+    } catch (_err) {
+      // Ignore health check prefetch errors
+    }
+  }
+  loadHealthStatus();
+
+  if (stopStudioBtn) {
+    stopStudioBtn.addEventListener('click', async () => {
+      if (isProcessingJob && !confirm('A video is currently processing. Stop Movie Censor Studio anyway?')) {
+        return;
+      }
+      stopStudioBtn.disabled = true;
+      try {
+        await fetch('/api/shutdown', { method: 'POST' });
+      } catch (_err) {
+        // Server may close connection immediately on shutdown
+      }
+      if (pollInterval) clearInterval(pollInterval);
+      isProcessingJob = false;
+      scanBtn.disabled = true;
+      startProcessBtn.disabled = true;
+      if (progressModal && progressModal.open) progressModal.close();
+      if (browserModal && browserModal.open) browserModal.close();
+      if (subtitleSearchDialog && subtitleSearchDialog.open) subtitleSearchDialog.close();
+      showScanError('Movie Censor Studio has stopped. You can safely close this browser tab.');
+      scanStatusText.textContent = 'Server stopped.';
     });
   }
 });

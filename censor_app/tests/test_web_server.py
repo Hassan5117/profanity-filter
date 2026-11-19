@@ -3,6 +3,8 @@ import io
 import json
 import os
 import shutil
+import socket
+import sys
 import tempfile
 import time
 import subprocess
@@ -463,6 +465,163 @@ class TestWebHandler(unittest.TestCase):
             self.assertEqual(saved_json.get("opensubtitles_password", ""), "")
         finally:
             server_module.Config = orig_config_cls
+
+    def test_api_health_and_port_fallback(self):
+        status, _, body = self._execute_request("GET", "/api/health")
+        self.assertEqual(status, 200)
+        health = json.loads(body.decode("utf-8"))
+        self.assertEqual(health["status"], "ok")
+        self.assertEqual(health["platform"], sys.platform)
+        self.assertTrue(health["ffmpeg"])
+        self.assertTrue(health["ffprobe"])
+        self.assertTrue(health["ffmpeg_ok"])
+        self.assertTrue(bool(health["install_hint"]))
+
+        occupier = server_module.StudioHTTPServer(("127.0.0.1", 0), StudioRequestHandler)
+        occupied_port = occupier.server_port
+        fallback_srv = None
+        try:
+            fallback_srv = server_module.run_studio_server(
+                host="127.0.0.1",
+                port=occupied_port,
+                max_port_attempts=10,
+            )
+            self.assertGreater(fallback_srv.server_port, occupied_port)
+            self.assertLess(fallback_srv.server_port, occupied_port + 10)
+        finally:
+            if fallback_srv is not None:
+                fallback_srv.server_close()
+            occupier.server_close()
+
+    def test_uploaded_video_export_path_tilde_resolution_and_custom_words(self):
+        server_module.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        uploaded_vid = server_module.UPLOAD_DIR / "uploaded_movie.mp4"
+        uploaded_srt = server_module.UPLOAD_DIR / "uploaded_movie.srt"
+        shutil.copy2(self.vid_path, uploaded_vid)
+        uploaded_srt.write_text(
+            "1\n00:00:00,400 --> 00:00:01,500\nWhat the heck is that customswear?\n",
+            encoding="utf-8",
+        )
+
+        with mock.patch.dict(os.environ, {"HOME": self.test_dir}, clear=False):
+            s_scan, _, b_scan = self._execute_request(
+                "POST", "/api/scan",
+                body=json.dumps({
+                    "video_path": "uploaded_movie.mp4",
+                    "srt_path": "uploaded_movie.srt",
+                    "preset": "moderate",
+                    "custom_words": "heck, customswear",
+                }).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(s_scan, 200)
+            scan_data = json.loads(b_scan.decode("utf-8"))
+            self.assertTrue(scan_data["is_uploaded"])
+            self.assertNotEqual(
+                Path(scan_data["suggested_output"]).resolve().parent,
+                server_module.UPLOAD_DIR.resolve(),
+            )
+            words = [d["word"].lower() for d in scan_data["detections"]]
+            self.assertEqual(words, ["heck", "customswear"])
+            self.assertTrue(all(d["tier"] == "custom" for d in scan_data["detections"]))
+
+            s_proc, _, b_proc = self._execute_request(
+                "POST", "/api/process",
+                body=json.dumps({
+                    "video_path": "uploaded_movie.mp4",
+                    "output_path": "~/tilde_out.Cleaned.mp4",
+                    "srt_path": "uploaded_movie.srt",
+                    "mode": "mute",
+                    "preset": "moderate",
+                    "custom_words": ["heck", "customswear"],
+                    "generate_clean_srt": True,
+                    "detections": scan_data["detections"],
+                }).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(s_proc, 200, f"Unexpected process response: {b_proc}")
+            expected_out = Path(self.test_dir) / "tilde_out.Cleaned.mp4"
+            self.assertEqual(
+                Path(json.loads(b_proc.decode("utf-8"))["output_path"]).resolve(),
+                expected_out.resolve(),
+            )
+
+            job_state = {}
+            for _ in range(50):
+                _, _, p_body = self._execute_request("GET", "/api/progress")
+                job_state = json.loads(p_body.decode("utf-8"))
+                if job_state.get("status") in ("completed", "failed"):
+                    break
+                time.sleep(0.1)
+
+            self.assertEqual(job_state.get("status"), "completed", f"Job failed: {job_state}")
+            self.assertTrue(expected_out.exists())
+            cleaned_srt = Path(job_state.get("cleaned_srt_path", ""))
+            self.assertTrue(cleaned_srt.exists())
+            srt_text = cleaned_srt.read_text(encoding="utf-8")
+            self.assertNotIn("heck", srt_text.lower())
+            self.assertNotIn("customswear", srt_text.lower())
+
+    def test_missing_ffmpeg_returns_friendly_error(self):
+        missing_deps = {
+            "ffmpeg": False,
+            "ffprobe": False,
+            "ffmpeg_path": None,
+            "ffprobe_path": None,
+            "ok": False,
+            "install_hint": "brew install ffmpeg",
+        }
+        with mock.patch.object(server_module.FFmpegProbe, "check_dependencies", return_value=missing_deps):
+            s_scan, _, b_scan = self._execute_request(
+                "POST", "/api/scan",
+                body=json.dumps({"video_path": self.vid_path, "srt_path": self.srt_path}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(s_scan, 400)
+            self.assertIn("brew install ffmpeg", json.loads(b_scan.decode("utf-8"))["error"])
+
+            s_proc, _, b_proc = self._execute_request(
+                "POST", "/api/process",
+                body=json.dumps({
+                    "video_path": self.vid_path,
+                    "output_path": os.path.join(self.test_dir, "out.mp4"),
+                }).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(s_proc, 400)
+            self.assertIn("brew install ffmpeg", json.loads(b_proc.decode("utf-8"))["error"])
+
+    def test_ui_plug_and_play_markup_and_css(self):
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+
+        for expected_html in (
+            '<meta name="color-scheme" content="dark">',
+            '<dialog id="browserModal"',
+            '<dialog id="progressModal"',
+            '<dialog id="subtitleSearchDialog"',
+            'id="customWordsInput"',
+            'id="ffmpegWarningBanner"',
+            'id="scanErrorBanner"',
+            'id="playerCompatNotice"',
+        ):
+            self.assertIn(expected_html, html)
+
+        for expected_css in (
+            "color-scheme: dark;",
+            'input[type="number"]',
+            ".btn-close",
+            ".btn-sm",
+            ".error-msg",
+            ".status-msg",
+            ".browser-path-nav",
+            ".browser-path-text",
+            "dialog:modal",
+            "dialog::backdrop",
+            "overscroll-behavior: contain",
+            "@media (max-width: 1024px)",
+        ):
+            self.assertIn(expected_css, css)
 
 
 if __name__ == "__main__":

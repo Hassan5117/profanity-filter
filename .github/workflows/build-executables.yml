@@ -1,0 +1,87 @@
+name: Build Executables
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Target platform(s) to build
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - windows
+          - macos
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows
+            vendor_dir: packaging/vendor/win64
+          - os: macos-latest
+            target: macos
+            vendor_dir: packaging/vendor/darwin
+    if: github.event_name == 'push' || inputs.platform == 'both' || inputs.platform == matrix.target
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Download static FFmpeg and FFprobe
+        run: python packaging/build.py --download-ffmpeg --only-download-ffmpeg --ffmpeg-dir "${{ matrix.vendor_dir }}"
+
+      - name: Add static FFmpeg to PATH for tests
+        shell: python
+        run: |
+          import os, pathlib
+          p = pathlib.Path("${{ matrix.vendor_dir }}").resolve()
+          with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as f:
+              f.write(str(p) + "\n")
+
+      - name: Run unit and integration tests
+        run: python -m unittest discover -s censor_app/tests -v
+
+      - name: Build, smoke-test, and zip executable
+        run: python packaging/build.py --ffmpeg-dir "${{ matrix.vendor_dir }}" --zip
+
+      - name: Upload build archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: MovieCensorStudio-${{ matrix.target }}
+          path: dist/*.zip
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build archives
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*.zip
+          generate_release_notes: true

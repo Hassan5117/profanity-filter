@@ -31,6 +31,8 @@ venv/
 # App local data & caches
 uploads/
 .cache/
+.venv-build/
+packaging/vendor/
 *.Cleaned.*
 config.json
 ffmpeg_audio_filter_temp.txt

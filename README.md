@@ -151,6 +151,26 @@ The script automatically detects `radarr_moviefile_path` or `sonarr_episodefile_
 
 ---
 
+## 📦 Standalone Executables (Windows & macOS)
+
+You can package Movie Censor Studio into a standalone desktop bundle (with static `ffmpeg` and `ffprobe` included—no Python or FFmpeg install needed by end users):
+
+### Build Locally (macOS or Windows)
+```bash
+python3 -m venv .venv-build
+.venv-build/bin/pip install pyinstaller   # Windows: .venv-build\Scripts\pip install pyinstaller
+python3 packaging/build.py --download-ffmpeg --pyinstaller .venv-build/bin/pyinstaller --zip
+```
+Outputs are created in `dist/` (`Movie Censor Studio.app` / `MovieCensorStudio-macOS-arm64.zip` on Apple Silicon, or `MovieCensorStudio\MovieCensorStudio.exe` / `MovieCensorStudio-Windows-x64.zip` on Windows).
+
+- **Optional `.env` placement:** Place a `.env` file beside `Movie Censor Studio.app` (or beside `MovieCensorStudio.exe` on Windows), or at `~/.config/censor_app/.env`, to auto-load subtitle API keys.
+- **Unsigned macOS builds:** If Gatekeeper prompts when opening a downloaded unsigned `.app`, right-click **Open** once or run `xattr -dr com.apple.quarantine "Movie Censor Studio.app"`.
+
+### GitHub Actions Builds
+The [Build Executables](.github/workflows/build-executables.yml) workflow builds Windows and macOS zip bundles only when manually triggered (**Actions → Build Executables → Run workflow**, with an option to build `both`, `windows`, or `macos`) or when pushing a version tag (`git tag v1.0.0 && git push origin v1.0.0`, which attaches both archives to a GitHub Release).
+
+---
+
 ## 🧪 Running Tests
 
 The test suite runs with Python's built-in `unittest` runner:
@@ -158,8 +178,9 @@ The test suite runs with Python's built-in `unittest` runner:
 python3 -m unittest discover -s censor_app/tests
 ```
 
-All 60 unit and integration tests verify:
+All 68 unit and integration tests verify:
 - Configuration loading, `.env` parsing, secret masking, and credential precedence
+- Standalone packaging binary resolution, frozen `.env`/static asset discovery, and shutdown/health endpoints
 - Subtitle parsing (SRT, WebVTT, encodings, HTML/SSA tags)
 - Trusted online subtitle discovery, ranking, archive unpacking, and SSRF/XXE guards
 - Profanity filtering & masked word detection
@@ -193,11 +214,15 @@ profanity-filter/
 │   │       ├── index.html
 │   │       ├── style.css
 │   │       └── app.js
-│   ├── tests/                  # Automated test suite (60 unit & integration tests)
+│   ├── tests/                  # Automated test suite (68 unit & integration tests)
 │   │   ├── test_config.py
+│   │   ├── test_packaging.py
 │   │   └── test_subtitle_fetcher.py
 │   ├── cli.py                  # Unified CLI
 │   └── main.py                 # Entrypoint
+├── packaging/
+│   ├── build.py                # Standalone bundle builder & static FFmpeg fetcher
+│   └── movie_censor_studio.spec
 ├── .env.example                # Template for local subtitle API credentials
 ├── app.py                      # Quick Web Studio launcher
 ├── mute_audio_from_srt.py      # Standalone & backward-compatible wrapper
