@@ -7,6 +7,11 @@ Reads target file path from environment variables or command-line arguments.
 import os
 import sys
 from pathlib import Path
+
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
 from censor_app.server.watcher import MediaWatcher
 from censor_app.core.config import Config
 
@@ -26,6 +31,15 @@ def get_target_media_path() -> Path:
     return None
 
 def main():
+    event_type = (
+        os.environ.get("radarr_eventtype")
+        or os.environ.get("sonarr_eventtype")
+        or ""
+    ).strip().lower()
+    if event_type == "test":
+        print("[PostProcess] Custom script test event succeeded.")
+        sys.exit(0)
+
     target = get_target_media_path()
     if not target:
         print("Usage: python3 -m censor_app.server.postprocess <path-to-video-file> [output-directory]")
@@ -49,8 +63,12 @@ def main():
         dest_msg = f"in {output_dir}" if output_dir else "alongside original"
         print(f"[PostProcess] Success! Cleaned media created {dest_msg}.")
         sys.exit(0)
+    elif watcher.last_result == "failed":
+        err = getattr(watcher._engine, "last_error", "") or "FFmpeg processing failed"
+        print(f"[Error] Post-processing failed: {err}")
+        sys.exit(1)
     else:
-        print(f"[PostProcess] Finished (no action required or error encountered).")
+        print(f"[PostProcess] Finished (status: {watcher.last_result}, no video changes needed).")
         sys.exit(0)
 
 if __name__ == "__main__":

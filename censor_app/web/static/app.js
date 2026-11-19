@@ -6,6 +6,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let pollInterval = null;
   let currentMediaDuration = 0;
   let selectedDetection = null;
+  let activeMuteChecker = null;
 
   // DOM Elements
   const videoPathInput = document.getElementById('videoPathInput');
@@ -65,6 +66,24 @@ document.addEventListener('DOMContentLoaded', () => {
   const browserUpBtn = document.getElementById('browserUpBtn');
   const browseVideoBtn = document.getElementById('browseVideoBtn');
   const browseSrtBtn = document.getElementById('browseSrtBtn');
+  const searchOnlineSubsBtn = document.getElementById('searchOnlineSubsBtn');
+  const subtitleSearchDialog = document.getElementById('subtitleSearchDialog');
+  const subtitleSearchForm = document.getElementById('subtitleSearchForm');
+  const subSearchTitle = document.getElementById('subSearchTitle');
+  const subSearchYear = document.getElementById('subSearchYear');
+  const subSearchSeason = document.getElementById('subSearchSeason');
+  const subSearchEpisode = document.getElementById('subSearchEpisode');
+  const subSearchImdb = document.getElementById('subSearchImdb');
+  const subSearchLang = document.getElementById('subSearchLang');
+  const runSubSearchBtn = document.getElementById('runSubSearchBtn');
+  const subSearchStatus = document.getElementById('subSearchStatus');
+  const subtitleResultsList = document.getElementById('subtitleResultsList');
+  const subOsApiKeyInput = document.getElementById('subOsApiKeyInput');
+  const subOsUserInput = document.getElementById('subOsUserInput');
+  const subOsPassInput = document.getElementById('subOsPassInput');
+  const subDlApiKeyInput = document.getElementById('subDlApiKeyInput');
+  const saveSubKeysBtn = document.getElementById('saveSubKeysBtn');
+  const subKeysStatus = document.getElementById('subKeysStatus');
   let browseTargetInput = null;
   let browserCurrentDir = '';
 
@@ -77,13 +96,44 @@ document.addEventListener('DOMContentLoaded', () => {
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   }
 
-  function escapeHtml(str) {
-    if (!str) return '';
-    return str
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+  function escapeRegExp(str) {
+    return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function clearTestMute() {
+    if (activeMuteChecker) {
+      previewPlayer.removeEventListener('timeupdate', activeMuteChecker);
+      activeMuteChecker = null;
+    }
+    previewPlayer.muted = false;
+  }
+
+  function appendHighlightedContext(container, contextText, word) {
+    const text = String(contextText || '');
+    const safeWord = String(word || '').trim();
+    if (!safeWord) {
+      container.appendChild(document.createTextNode(text));
+      return;
+    }
+    const escaped = escapeRegExp(safeWord);
+    const left = /^\w/.test(safeWord) ? '\\b' : '';
+    const right = /\w$/.test(safeWord) ? '\\b' : '';
+    const regex = new RegExp(`${left}(${escaped})${right}`, 'gi');
+    let lastIndex = 0;
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        container.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+      }
+      const mark = document.createElement('mark');
+      mark.textContent = match[0];
+      container.appendChild(mark);
+      lastIndex = regex.lastIndex;
+      if (match[0].length === 0) break;
+    }
+    if (lastIndex < text.length) {
+      container.appendChild(document.createTextNode(text.slice(lastIndex)));
+    }
   }
 
   // File Upload Elements
@@ -192,6 +242,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Timing & Sync Elements
   const timingPresetSelect = document.getElementById('timingPresetSelect');
+  const audioRefineToggle = document.getElementById('audioRefineToggle');
   const syncOffsetInput = document.getElementById('syncOffsetInput');
   const syncMinusHalfBtn = document.getElementById('syncMinusHalfBtn');
   const syncMinusTenthBtn = document.getElementById('syncMinusTenthBtn');
@@ -208,10 +259,35 @@ document.addEventListener('DOMContentLoaded', () => {
   if (syncPlusTenthBtn) syncPlusTenthBtn.addEventListener('click', () => adjustSync(+0.2));
   if (syncPlusHalfBtn) syncPlusHalfBtn.addEventListener('click', () => adjustSync(+0.5));
 
-  // Timecode update in player
+  // Timecode update and mute listener cleanup in player
   previewPlayer.addEventListener('timeupdate', () => {
     playerTimecode.textContent = formatSeconds(previewPlayer.currentTime);
   });
+  previewPlayer.addEventListener('pause', clearTestMute);
+  previewPlayer.addEventListener('ended', clearTestMute);
+
+  if (timingPresetSelect && wordTimingToggle) {
+    timingPresetSelect.addEventListener('change', () => {
+      wordTimingToggle.checked = (timingPresetSelect.value !== 'segment');
+      if (!workspace.classList.contains('hidden') && videoPathInput.value.trim()) {
+        scanBtn.click();
+      }
+    });
+    wordTimingToggle.addEventListener('change', () => {
+      timingPresetSelect.value = wordTimingToggle.checked ? 'smart' : 'segment';
+      if (!workspace.classList.contains('hidden') && videoPathInput.value.trim()) {
+        scanBtn.click();
+      }
+    });
+  }
+  if (audioRefineToggle) {
+    audioRefineToggle.addEventListener('change', () => {
+      if (!workspace.classList.contains('hidden') && videoPathInput.value.trim()
+          && timingPresetSelect && timingPresetSelect.value !== 'segment') {
+        scanBtn.click();
+      }
+    });
+  }
 
   // Scan Media
   scanBtn.addEventListener('click', async () => {
@@ -227,17 +303,20 @@ document.addEventListener('DOMContentLoaded', () => {
     scanBtn.disabled = true;
 
     // Calculate timing parameters
-    const presetVal = timingPresetSelect ? timingPresetSelect.value : 'safe';
-    let padBefore = 0.35, padAfter = 0.35, leadIn = 0.25, timingMode = 'word';
-    if (presetVal === 'safe') {
-      padBefore = 0.35; padAfter = 0.35; leadIn = 0.25; timingMode = 'word';
-    } else if (presetVal === 'standard') {
-      padBefore = 0.25; padAfter = 0.25; leadIn = 0.15; timingMode = 'word';
+    const presetVal = timingPresetSelect ? timingPresetSelect.value : 'smart';
+    let padBefore = 0.18, padAfter = 0.16, leadIn = 0.10, timingMode = 'word';
+    if (presetVal === 'smart') {
+      padBefore = 0.18; padAfter = 0.16; leadIn = 0.10; timingMode = 'word';
     } else if (presetVal === 'tight') {
-      padBefore = 0.15; padAfter = 0.15; leadIn = 0.05; timingMode = 'word';
+      padBefore = 0.10; padAfter = 0.10; leadIn = 0.05; timingMode = 'word';
+    } else if (presetVal === 'standard') {
+      padBefore = 0.22; padAfter = 0.20; leadIn = 0.12; timingMode = 'word';
+    } else if (presetVal === 'safe') {
+      padBefore = 0.32; padAfter = 0.30; leadIn = 0.20; timingMode = 'word';
     } else if (presetVal === 'segment') {
       padBefore = 0.20; padAfter = 0.20; leadIn = 0.0; timingMode = 'segment';
     }
+    const audioRefine = (timingMode !== 'segment') && (audioRefineToggle ? audioRefineToggle.checked : true);
     const syncOffset = syncOffsetInput ? (parseFloat(syncOffsetInput.value) || 0.0) : 0.0;
 
     try {
@@ -252,7 +331,9 @@ document.addEventListener('DOMContentLoaded', () => {
           padding_before: padBefore,
           padding_after: padAfter,
           lead_in: leadIn,
-          sync_offset: syncOffset
+          audio_refine: audioRefine,
+          sync_offset: syncOffset,
+          sub_lang: subSearchLang ? subSearchLang.value : 'en'
         })
       });
 
@@ -262,7 +343,12 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       // Populate UI
-      detections = data.detections || [];
+      clearTestMute();
+      detections = (data.detections || []).map(d => ({
+        ...d,
+        orig_mute_start: d.mute_start,
+        orig_mute_end: d.mute_end
+      }));
       currentMediaDuration = data.duration || 0;
       outputVideoInput.value = data.suggested_output || '';
 
@@ -284,7 +370,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
       // Show Workspace
       workspace.classList.remove('hidden');
-      scanStatusText.textContent = `Scan complete: ${detections.length} profanities found.`;
+      scanStatusText.textContent = data.subtitle_downloaded
+        ? `Scan complete: ${detections.length} profanities found (auto-downloaded subtitles from ${data.subtitle_provider}).`
+        : `Scan complete: ${detections.length} profanities found.`;
 
       renderTable();
       updateCounters();
@@ -298,18 +386,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Render Table
   function renderTable() {
-    detectionsTbody.innerHTML = '';
+    detectionsTbody.textContent = '';
 
     const filtered = detections.filter(d => {
       const matchesTier = (currentFilterTier === 'all') || (d.tier === currentFilterTier);
-      const matchesSearch = !searchQuery || 
-        d.word.toLowerCase().includes(searchQuery.toLowerCase()) || 
+      const matchesSearch = !searchQuery ||
+        d.word.toLowerCase().includes(searchQuery.toLowerCase()) ||
         d.context_text.toLowerCase().includes(searchQuery.toLowerCase());
       return matchesTier && matchesSearch;
     });
 
     if (filtered.length === 0) {
-      detectionsTbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 24px;">No matching profanities found.</td></tr>`;
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 6;
+      td.style.textAlign = 'center';
+      td.style.color = 'var(--text-muted)';
+      td.style.padding = '24px';
+      td.textContent = 'No matching profanities found.';
+      tr.appendChild(td);
+      detectionsTbody.appendChild(tr);
       return;
     }
 
@@ -319,81 +415,143 @@ document.addEventListener('DOMContentLoaded', () => {
         tr.style.backgroundColor = 'rgba(56, 189, 248, 0.08)';
       }
 
-      // Highlight profanity in context text
-      const regex = new RegExp(`\\b(${escapeHtml(d.word)})\\b`, 'gi');
-      const highlightedContext = escapeHtml(d.context_text).replace(regex, '<mark>$1</mark>');
-
-      tr.innerHTML = `
-        <td><input type="checkbox" class="row-checkbox" data-id="${d.id}" ${d.enabled ? 'checked' : ''} /></td>
-        <td>
-          <button class="time-btn" data-time="${d.mute_start}">${formatSeconds(d.mute_start)}</button>
-          <div style="margin-top: 4px; display: flex; gap: 2px;">
-            <button class="nudge-btn nudge-earlier" title="Start mute 0.2s earlier (prevents missing start of word)">◀ Earlier</button>
-            <button class="nudge-btn nudge-later" title="Extend mute 0.2s later">Later ▶</button>
-          </div>
-        </td>
-        <td><span class="badge badge-${d.tier}">${escapeHtml(d.word)}</span></td>
-        <td><span style="color: var(--text-muted); text-transform: capitalize;">${d.tier}</span></td>
-        <td>${highlightedContext}</td>
-        <td><button class="btn-xs test-mute-btn" title="Listen to this exact word muted in preview player">🎧 Test Mute</button></td>
-      `;
-
-      // Checkbox event
-      tr.querySelector('.row-checkbox').addEventListener('change', (e) => {
+      // 1. Checkbox cell
+      const tdCheck = document.createElement('td');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'row-checkbox';
+      checkbox.dataset.id = String(d.id);
+      checkbox.checked = Boolean(d.enabled);
+      checkbox.addEventListener('change', (e) => {
         d.enabled = e.target.checked;
         updateCounters();
       });
+      tdCheck.appendChild(checkbox);
+      tr.appendChild(tdCheck);
 
-      // Timecode click: jump player and play
-      tr.querySelector('.time-btn').addEventListener('click', () => {
+      // 2. Time & Nudge cell
+      const tdTime = document.createElement('td');
+      const timeHeader = document.createElement('div');
+      timeHeader.style.display = 'flex';
+      timeHeader.style.alignItems = 'center';
+
+      const timeBtn = document.createElement('button');
+      timeBtn.className = 'time-btn';
+      timeBtn.dataset.time = String(d.mute_start);
+      timeBtn.textContent = formatSeconds(d.mute_start);
+      timeBtn.addEventListener('click', () => {
+        clearTestMute();
         selectedDetection = d;
         previewPlayer.currentTime = Math.max(0, d.mute_start - 0.5);
         previewPlayer.play();
         renderTable();
       });
 
-      // Nudge Earlier
-      tr.querySelector('.nudge-earlier').addEventListener('click', (e) => {
+      const spanBadge = document.createElement('span');
+      spanBadge.className = 'mute-span-badge';
+      const muteDur = Math.max(0, (Number(d.mute_end) || 0) - (Number(d.mute_start) || 0));
+      spanBadge.textContent = `(${muteDur.toFixed(2)}s)`;
+
+      timeHeader.appendChild(timeBtn);
+      timeHeader.appendChild(spanBadge);
+      tdTime.appendChild(timeHeader);
+
+      const nudgeRow = document.createElement('div');
+      nudgeRow.style.marginTop = '4px';
+      nudgeRow.style.display = 'flex';
+      nudgeRow.style.gap = '2px';
+
+      const earlierBtn = document.createElement('button');
+      earlierBtn.className = 'nudge-btn nudge-earlier';
+      earlierBtn.title = 'Start mute 0.2s earlier (prevents missing start of word)';
+      earlierBtn.textContent = '◀ Earlier';
+      earlierBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         d.mute_start = Math.max(0, Math.round((d.mute_start - 0.2) * 100) / 100);
         renderTable();
         updateCounters();
       });
 
-      // Nudge Later
-      tr.querySelector('.nudge-later').addEventListener('click', (e) => {
+      const laterBtn = document.createElement('button');
+      laterBtn.className = 'nudge-btn nudge-later';
+      laterBtn.title = 'Extend mute 0.2s later';
+      laterBtn.textContent = 'Later ▶';
+      laterBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         d.mute_end = Math.round((d.mute_end + 0.2) * 100) / 100;
         renderTable();
         updateCounters();
       });
 
-      // Test Mute with live audio ducking/muting on preview player
-      tr.querySelector('.test-mute-btn').addEventListener('click', () => {
+      const resetBtn = document.createElement('button');
+      resetBtn.className = 'nudge-btn nudge-reset';
+      resetBtn.title = 'Reset timing to scanned default';
+      resetBtn.textContent = '↺';
+      resetBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        d.mute_start = d.orig_mute_start;
+        d.mute_end = d.orig_mute_end;
+        renderTable();
+        updateCounters();
+      });
+
+      nudgeRow.appendChild(earlierBtn);
+      nudgeRow.appendChild(laterBtn);
+      nudgeRow.appendChild(resetBtn);
+      tdTime.appendChild(nudgeRow);
+      tr.appendChild(tdTime);
+
+      // 3. Word badge cell
+      const tdWord = document.createElement('td');
+      const wordBadge = document.createElement('span');
+      const tierClass = ['strict', 'moderate', 'mild', 'custom'].includes(d.tier) ? d.tier : 'info';
+      wordBadge.className = `badge badge-${tierClass}`;
+      wordBadge.textContent = String(d.word || '');
+      tdWord.appendChild(wordBadge);
+      tr.appendChild(tdWord);
+
+      // 4. Severity cell
+      const tdTier = document.createElement('td');
+      const tierSpan = document.createElement('span');
+      tierSpan.style.color = 'var(--text-muted)';
+      tierSpan.style.textTransform = 'capitalize';
+      tierSpan.textContent = String(d.tier || '');
+      tdTier.appendChild(tierSpan);
+      tr.appendChild(tdTier);
+
+      // 5. Context Dialogue cell
+      const tdContext = document.createElement('td');
+      appendHighlightedContext(tdContext, d.context_text, d.word);
+      tr.appendChild(tdContext);
+
+      // 6. Preview cell
+      const tdPreview = document.createElement('td');
+      const testBtn = document.createElement('button');
+      testBtn.className = 'btn-xs test-mute-btn';
+      testBtn.title = 'Listen to this exact word muted in preview player';
+      testBtn.textContent = '🎧 Test Mute';
+      testBtn.addEventListener('click', () => {
+        clearTestMute();
         selectedDetection = d;
         previewPlayer.currentTime = Math.max(0, d.mute_start - 1.0);
         previewPlayer.play();
 
-        const muteChecker = () => {
+        activeMuteChecker = () => {
           if (previewPlayer.paused || previewPlayer.ended) {
-            previewPlayer.removeEventListener('timeupdate', muteChecker);
-            previewPlayer.muted = false;
+            clearTestMute();
             return;
           }
           const t = previewPlayer.currentTime;
-          if (t >= d.mute_start && t <= d.mute_end) {
-            previewPlayer.muted = true;
-          } else {
-            previewPlayer.muted = false;
-          }
+          previewPlayer.muted = (t >= d.mute_start && t <= d.mute_end);
           if (t > d.mute_end + 1.2) {
-            previewPlayer.removeEventListener('timeupdate', muteChecker);
-            previewPlayer.muted = false;
+            clearTestMute();
           }
         };
-        previewPlayer.addEventListener('timeupdate', muteChecker);
+        previewPlayer.addEventListener('timeupdate', activeMuteChecker);
         renderTable();
       });
+      tdPreview.appendChild(testBtn);
+      tr.appendChild(tdPreview);
 
       detectionsTbody.appendChild(tr);
     });
@@ -406,9 +564,29 @@ document.addEventListener('DOMContentLoaded', () => {
     renderBtnCount.textContent = active.length;
 
     let totalMuteSecs = 0;
-    active.forEach(d => {
-      totalMuteSecs += Math.max(0, d.mute_end - d.mute_start);
-    });
+    if (active.length > 0) {
+      const sorted = active
+        .map(d => [Math.max(0, Number(d.mute_start) || 0), Math.max(0, Number(d.mute_end) || 0)])
+        .filter(([s, e]) => e > s)
+        .sort((a, b) => a[0] - b[0]);
+
+      if (sorted.length > 0) {
+        const merged = [sorted[0].slice()];
+        const gapThreshold = 0.25;
+        for (let i = 1; i < sorted.length; i++) {
+          const [s, e] = sorted[i];
+          const last = merged[merged.length - 1];
+          if (s <= last[1] + gapThreshold) {
+            last[1] = Math.max(last[1], e);
+          } else {
+            merged.push([s, e]);
+          }
+        }
+        merged.forEach(([s, e]) => {
+          totalMuteSecs += (e - s);
+        });
+      }
+    }
     statMuteDuration.textContent = `${totalMuteSecs.toFixed(1)}s`;
 
     masterCheckbox.checked = active.length === detections.length && detections.length > 0;
@@ -451,6 +629,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Play Selected Word Clip
   playSelectedBtn.addEventListener('click', () => {
+    clearTestMute();
     if (!selectedDetection && detections.length > 0) {
       selectedDetection = detections[0];
     }
@@ -487,6 +666,7 @@ document.addEventListener('DOMContentLoaded', () => {
           output_path: outputPath,
           srt_path: srtPath,
           mode: modeSelect.value,
+          preset: presetSelect.value,
           center_channel_only: centerOnlyToggle.checked,
           generate_clean_srt: cleanSrtToggle.checked,
           detections: detections
@@ -503,6 +683,8 @@ document.addEventListener('DOMContentLoaded', () => {
       progressTitle.textContent = 'Censoring Media...';
       progressSubtitle.textContent = 'Losslessly copying video stream & processing audio...';
       progressCompletionActions.classList.add('hidden');
+      revealFinderBtn.classList.remove('hidden');
+      previewCleanedBtn.classList.remove('hidden');
       progressErrorMsg.classList.add('hidden');
       cancelProcessBtn.classList.remove('hidden');
       progressBar.style.width = '0%';
@@ -534,6 +716,8 @@ document.addEventListener('DOMContentLoaded', () => {
           progressTitle.textContent = '🎉 Processing Complete!';
           progressSubtitle.textContent = `Saved to: ${data.output_path}`;
           cancelProcessBtn.classList.add('hidden');
+          revealFinderBtn.classList.remove('hidden');
+          previewCleanedBtn.classList.remove('hidden');
           progressCompletionActions.classList.remove('hidden');
 
           // Hook completion buttons
@@ -546,6 +730,7 @@ document.addEventListener('DOMContentLoaded', () => {
           };
 
           previewCleanedBtn.onclick = () => {
+            clearTestMute();
             progressModal.classList.add('hidden');
             previewPlayer.src = `/api/stream?path=${encodeURIComponent(data.output_path)}`;
             previewPlayer.play();
@@ -556,6 +741,10 @@ document.addEventListener('DOMContentLoaded', () => {
           progressSubtitle.textContent = data.error || 'An error occurred during FFmpeg execution';
           progressErrorMsg.textContent = data.error || 'Unknown error';
           progressErrorMsg.classList.remove('hidden');
+          cancelProcessBtn.classList.add('hidden');
+          revealFinderBtn.classList.add('hidden');
+          previewCleanedBtn.classList.add('hidden');
+          progressCompletionActions.classList.remove('hidden');
         }
       } catch (e) {
         // network glitch
@@ -582,10 +771,10 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = await resp.json();
       browserCurrentDir = data.current_dir;
       browserCurrentPath.textContent = browserCurrentDir;
-      browserList.innerHTML = '';
+      browserList.textContent = '';
 
       if (browserBookmarks && data.bookmarks) {
-        browserBookmarks.innerHTML = '';
+        browserBookmarks.textContent = '';
         data.bookmarks.forEach(bm => {
           const btn = document.createElement('button');
           btn.className = 'bookmark-btn';
@@ -602,7 +791,13 @@ document.addEventListener('DOMContentLoaded', () => {
       data.items.forEach(item => {
         const div = document.createElement('div');
         div.className = 'browser-item';
-        div.innerHTML = `<span>${item.is_dir ? '📁' : (item.is_video ? '🎬' : '📄')}</span> <span>${escapeHtml(item.name)}</span>`;
+        const iconSpan = document.createElement('span');
+        iconSpan.textContent = item.is_dir ? '📁' : (item.is_video ? '🎬' : '📄');
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = String(item.name || '');
+        div.appendChild(iconSpan);
+        div.appendChild(document.createTextNode(' '));
+        div.appendChild(nameSpan);
         div.addEventListener('click', () => {
           if (item.is_dir) {
             loadBrowserDir(item.path);
@@ -616,7 +811,12 @@ document.addEventListener('DOMContentLoaded', () => {
         browserList.appendChild(div);
       });
     } catch (err) {
-      browserList.innerHTML = `<div style="padding: 12px; color: var(--tier-strict);">Failed to load directory</div>`;
+      browserList.textContent = '';
+      const errDiv = document.createElement('div');
+      errDiv.style.padding = '12px';
+      errDiv.style.color = 'var(--tier-strict)';
+      errDiv.textContent = 'Failed to load directory';
+      browserList.appendChild(errDiv);
     }
   }
 
@@ -635,4 +835,265 @@ document.addEventListener('DOMContentLoaded', () => {
   closeBrowserBtn.addEventListener('click', () => {
     browserModal.classList.add('hidden');
   });
+
+  // Trusted Online Subtitle Search Dialog
+  function applyMaskedConfigState(cfg) {
+    if (!cfg) return;
+    if (subSearchLang && cfg.subtitle_language) {
+      const opt = Array.from(subSearchLang.options).find(o => o.value === cfg.subtitle_language);
+      if (opt) subSearchLang.value = cfg.subtitle_language;
+    }
+    if (subOsUserInput) subOsUserInput.value = cfg.opensubtitles_username || '';
+    if (subOsApiKeyInput) {
+      subOsApiKeyInput.placeholder = cfg.opensubtitles_api_key_from_env
+        ? 'Loaded from .env / environment'
+        : (cfg.has_opensubtitles_api_key
+          ? 'Saved (enter new key to replace)'
+          : 'Optional API key');
+    }
+    if (subOsPassInput) {
+      subOsPassInput.placeholder = cfg.opensubtitles_password_from_env
+        ? 'Loaded from .env / environment'
+        : (cfg.has_opensubtitles_password
+          ? 'Saved (enter new password to replace)'
+          : 'Optional password');
+    }
+    if (subDlApiKeyInput) {
+      subDlApiKeyInput.placeholder = cfg.subdl_api_key_from_env
+        ? 'Loaded from .env / environment'
+        : (cfg.has_subdl_api_key
+          ? 'Saved (enter new key to replace)'
+          : 'Optional API key');
+    }
+  }
+
+  async function loadSubtitleConfig() {
+    try {
+      const resp = await fetch('/api/config');
+      if (resp.ok) {
+        const cfg = await resp.json();
+        applyMaskedConfigState(cfg);
+      }
+    } catch (_err) {
+      // Ignore config prefetch errors
+    }
+  }
+
+  function renderSubtitleResults(candidates) {
+    if (!subtitleResultsList) return;
+    subtitleResultsList.textContent = '';
+
+    if (!candidates || candidates.length === 0) {
+      const emptyLi = document.createElement('li');
+      emptyLi.className = 'sub-result-empty';
+      emptyLi.textContent = 'No matching subtitles found from trusted providers. Adjust the title/IMDb ID or add optional API credentials below.';
+      subtitleResultsList.appendChild(emptyLi);
+      return;
+    }
+
+    candidates.forEach((cand) => {
+      const li = document.createElement('li');
+      li.className = 'sub-result-item';
+
+      const infoDiv = document.createElement('div');
+      infoDiv.className = 'sub-result-info';
+
+      const releaseDiv = document.createElement('div');
+      releaseDiv.className = 'sub-result-release';
+      releaseDiv.textContent = cand.release_name || cand.file_name || cand.title || 'Subtitle';
+      infoDiv.appendChild(releaseDiv);
+
+      const metaDiv = document.createElement('div');
+      metaDiv.className = 'sub-result-meta';
+
+      const providerSpan = document.createElement('span');
+      providerSpan.className = 'badge badge-info';
+      providerSpan.textContent = cand.provider;
+      metaDiv.appendChild(providerSpan);
+
+      if (cand.hash_matched) {
+        const hashSpan = document.createElement('span');
+        hashSpan.className = 'badge badge-mild';
+        hashSpan.textContent = 'HASH MATCH';
+        metaDiv.appendChild(hashSpan);
+      }
+
+      if (cand.hearing_impaired) {
+        const hiSpan = document.createElement('span');
+        hiSpan.className = 'badge badge-moderate';
+        hiSpan.textContent = 'HI';
+        metaDiv.appendChild(hiSpan);
+      }
+
+      const detailSpan = document.createElement('span');
+      detailSpan.textContent = `Lang: ${cand.language || 'en'} | Downloads: ${cand.downloads || 0} | Score: ${cand.score ?? 0}`;
+      metaDiv.appendChild(detailSpan);
+
+      infoDiv.appendChild(metaDiv);
+      li.appendChild(infoDiv);
+
+      const useBtn = document.createElement('button');
+      useBtn.type = 'button';
+      useBtn.className = 'btn-primary btn-sm';
+      useBtn.textContent = 'Use Subtitle';
+      useBtn.addEventListener('click', async () => {
+        useBtn.disabled = true;
+        useBtn.textContent = 'Downloading...';
+        subSearchStatus.textContent = `Downloading from ${cand.provider}...`;
+        try {
+          const resp = await fetch('/api/subtitles/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              video_path: videoPathInput.value.trim(),
+              provider: cand.provider,
+              subtitle_id: cand.subtitle_id,
+              title: cand.title,
+              language: subSearchLang ? subSearchLang.value : cand.language,
+              release_name: cand.release_name,
+              file_name: cand.file_name,
+              download_url: cand.download_url,
+              download_id: cand.download_id
+            })
+          });
+          const dlData = await resp.json();
+          if (!resp.ok) {
+            throw new Error(dlData.error || 'Subtitle download failed');
+          }
+          srtPathInput.value = dlData.srt_path;
+          scanStatusText.textContent = `Downloaded ${dlData.cue_count} subtitle cues from ${dlData.provider}. Click Scan for Profanity.`;
+          subSearchStatus.textContent = '';
+          subtitleSearchDialog.close();
+        } catch (err) {
+          subSearchStatus.textContent = `Error: ${err.message}`;
+          useBtn.disabled = false;
+          useBtn.textContent = 'Use Subtitle';
+        }
+      });
+
+      li.appendChild(useBtn);
+      subtitleResultsList.appendChild(li);
+    });
+  }
+
+  async function performSubtitleSearch() {
+    if (!runSubSearchBtn) return;
+    runSubSearchBtn.disabled = true;
+    subSearchStatus.textContent = 'Querying trusted providers...';
+
+    try {
+      const resp = await fetch('/api/subtitles/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          video_path: videoPathInput.value.trim(),
+          title: subSearchTitle.value.trim(),
+          year: subSearchYear.value.trim(),
+          season: subSearchSeason.value.trim(),
+          episode: subSearchEpisode.value.trim(),
+          imdb_id: subSearchImdb.value.trim(),
+          language: subSearchLang ? subSearchLang.value : 'en'
+        })
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        throw new Error(data.error || 'Subtitle search failed');
+      }
+
+      if (data.query) {
+        if (!subSearchTitle.value.trim() && data.query.title) subSearchTitle.value = data.query.title;
+        if (!subSearchYear.value.trim() && data.query.year) subSearchYear.value = String(data.query.year);
+        if (!subSearchSeason.value.trim() && data.query.season !== null && data.query.season !== undefined) {
+          subSearchSeason.value = String(data.query.season);
+        }
+        if (!subSearchEpisode.value.trim() && data.query.episode !== null && data.query.episode !== undefined) {
+          subSearchEpisode.value = String(data.query.episode);
+        }
+        if (!subSearchImdb.value.trim() && data.query.imdb_id) subSearchImdb.value = data.query.imdb_id;
+      }
+
+      const candidates = data.candidates || [];
+      subSearchStatus.textContent = `Found ${candidates.length} subtitle match(es).`;
+      renderSubtitleResults(candidates);
+    } catch (err) {
+      subSearchStatus.textContent = `Search error: ${err.message}`;
+      renderSubtitleResults([]);
+    } finally {
+      runSubSearchBtn.disabled = false;
+    }
+  }
+
+  if (searchOnlineSubsBtn && subtitleSearchDialog) {
+    // Fallback for browsers without closedby attribute support
+    if (!('closedBy' in HTMLDialogElement.prototype)) {
+      subtitleSearchDialog.addEventListener('click', (event) => {
+        if (event.target !== subtitleSearchDialog) return;
+        const rect = subtitleSearchDialog.getBoundingClientRect();
+        const isDialogContent = (
+          rect.top <= event.clientY &&
+          event.clientY <= rect.top + rect.height &&
+          rect.left <= event.clientX &&
+          event.clientX <= rect.left + rect.width
+        );
+        if (isDialogContent) return;
+        subtitleSearchDialog.close();
+      });
+    }
+
+    searchOnlineSubsBtn.addEventListener('click', async () => {
+      await loadSubtitleConfig();
+      subtitleResultsList.textContent = '';
+      subSearchStatus.textContent = '';
+      subKeysStatus.textContent = '';
+      subtitleSearchDialog.showModal();
+      if (videoPathInput.value.trim() || subSearchTitle.value.trim() || subSearchImdb.value.trim()) {
+        performSubtitleSearch();
+      } else if (subSearchTitle) {
+        subSearchTitle.focus();
+      }
+    });
+  }
+
+  if (subtitleSearchForm) {
+    subtitleSearchForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      performSubtitleSearch();
+    });
+  }
+
+  if (saveSubKeysBtn) {
+    saveSubKeysBtn.addEventListener('click', async () => {
+      const payload = {
+        subtitle_language: subSearchLang ? subSearchLang.value : 'en',
+        opensubtitles_username: subOsUserInput ? subOsUserInput.value.trim() : ''
+      };
+      if (subOsApiKeyInput && subOsApiKeyInput.value.trim()) {
+        payload.opensubtitles_api_key = subOsApiKeyInput.value.trim();
+      }
+      if (subOsPassInput && subOsPassInput.value) {
+        payload.opensubtitles_password = subOsPassInput.value;
+      }
+      if (subDlApiKeyInput && subDlApiKeyInput.value.trim()) {
+        payload.subdl_api_key = subDlApiKeyInput.value.trim();
+      }
+
+      subKeysStatus.textContent = 'Saving...';
+      try {
+        const resp = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Save failed');
+        if (subOsApiKeyInput) subOsApiKeyInput.value = '';
+        if (subOsPassInput) subOsPassInput.value = '';
+        if (subDlApiKeyInput) subDlApiKeyInput.value = '';
+        applyMaskedConfigState(data.config);
+        subKeysStatus.textContent = 'Provider settings saved.';
+      } catch (err) {
+        subKeysStatus.textContent = `Save error: ${err.message}`;
+      }
+    });
+  }
 });

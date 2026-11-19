@@ -45,9 +45,9 @@
       <div class="card-title">1. Select Media Files</div>
       <div class="file-grid">
         <div class="file-box">
-          <label>Video File (MP4, MKV, MOV, WebM):</label>
+          <label for="videoPathInput">Video File (MP4, MKV, MOV, WebM):</label>
           <div class="input-with-browse">
-            <input type="text" id="videoPathInput" placeholder="/path/to/movie.mp4 or drop file" />
+            <input type="text" id="videoPathInput" name="video_path" placeholder="/path/to/movie.mp4 or drop file" />
             <button id="browseVideoBtn" class="btn-secondary" title="Pick from folder on Mac">📁 Browse...</button>
             <button id="pickVideoFileBtn" class="btn-secondary" title="Upload from computer">⬆ Upload</button>
             <input type="file" id="videoFileInput" accept="video/*,.mkv,.mp4,.mov,.avi,.webm,.m4v" style="display: none;" />
@@ -62,11 +62,12 @@
         </div>
 
         <div class="file-box">
-          <label>Subtitles (SRT, VTT, or embedded):</label>
+          <label for="srtPathInput">Subtitles (SRT, VTT, or embedded):</label>
           <div class="input-with-browse">
-            <input type="text" id="srtPathInput" placeholder="Auto-detected if left empty or embedded" />
-            <button id="browseSrtBtn" class="btn-secondary" title="Pick from folder on Mac">📁 Browse...</button>
-            <button id="pickSrtFileBtn" class="btn-secondary" title="Upload from computer">⬆ Upload</button>
+            <input type="text" id="srtPathInput" name="srt_path" placeholder="Auto-detected, embedded, or fetched online if left empty" />
+            <button type="button" id="browseSrtBtn" class="btn-secondary" title="Pick from folder on Mac">📁 Browse...</button>
+            <button type="button" id="pickSrtFileBtn" class="btn-secondary" title="Upload from computer">⬆ Upload</button>
+            <button type="button" id="searchOnlineSubsBtn" class="btn-secondary" title="Search trusted subtitle providers online">🌐 Search Online...</button>
             <input type="file" id="srtFileInput" accept=".srt,.vtt" style="display: none;" />
           </div>
           <div id="srtDropZone" class="drop-zone">
@@ -82,19 +83,27 @@
       <div class="timing-settings-row">
         <div class="control-group">
           <label for="timingPresetSelect">Mute Envelope &amp; Precision</label>
-          <select id="timingPresetSelect">
-            <option value="safe" selected>Generous (Recommended: 0.35s pad + 0.25s lead-in to prevent cutting half-way)</option>
-            <option value="standard">Standard (0.25s pad + 0.15s lead-in)</option>
-            <option value="tight">Tight (0.15s pad, narrow)</option>
+          <select id="timingPresetSelect" name="timing_preset">
+            <option value="smart" selected>Smart Tight (Recommended: Clause + Audio-Aligned Word Mute)</option>
+            <option value="tight">Ultra Tight (0.10s pad + Audio-Aligned, minimal margin)</option>
+            <option value="standard">Balanced (0.22s pad + 0.12s lead-in + Audio-Aligned)</option>
+            <option value="safe">Generous / Safe (0.32s pad + 0.20s lead-in)</option>
             <option value="segment">Full Subtitle Line (100% guaranteed word capture)</option>
           </select>
+        </div>
+        <div class="control-group">
+          <span class="control-label">Waveform Alignment</span>
+          <label for="audioRefineToggle" class="checkbox-label">
+            <input type="checkbox" id="audioRefineToggle" name="audio_refine" checked />
+            <span>Snap to speech &amp; pauses</span>
+          </label>
         </div>
         <div class="control-group">
           <label for="syncOffsetInput">Subtitle Audio Sync Shift (+/- sec)</label>
           <div class="sync-offset-control">
             <button type="button" id="syncMinusHalfBtn" class="btn-xs" title="Nudge subtitles 0.5s earlier">-0.5s</button>
             <button type="button" id="syncMinusTenthBtn" class="btn-xs" title="Nudge subtitles 0.2s earlier">-0.2s</button>
-            <input type="number" id="syncOffsetInput" step="0.1" value="0.0" style="width: 74px; text-align: center;" />
+            <input type="number" id="syncOffsetInput" name="sync_offset" step="0.1" value="0.0" style="width: 74px; text-align: center;" />
             <button type="button" id="syncPlusTenthBtn" class="btn-xs" title="Nudge subtitles 0.2s later">+0.2s</button>
             <button type="button" id="syncPlusHalfBtn" class="btn-xs" title="Nudge subtitles 0.5s later">+0.5s</button>
           </div>
@@ -166,6 +175,7 @@
               <button class="pill" data-filter="strict">Strict</button>
               <button class="pill" data-filter="moderate">Moderate</button>
               <button class="pill" data-filter="mild">Mild</button>
+              <button class="pill" data-filter="custom">Custom</button>
             </div>
           </div>
 
@@ -174,7 +184,7 @@
               <thead>
                 <tr>
                   <th width="40"><input type="checkbox" id="masterCheckbox" checked /></th>
-                  <th width="150">Time &amp; Nudge</th>
+                  <th width="165">Time &amp; Nudge</th>
                   <th width="110">Word</th>
                   <th width="85">Severity</th>
                   <th>Context Dialogue</th>
@@ -194,20 +204,20 @@
         <div class="card-title">2. Processing & Output Options</div>
         <div class="options-grid">
           <div class="option-field">
-            <label>Output Video Destination:</label>
-            <input type="text" id="outputVideoInput" />
+            <label for="outputVideoInput">Output Video Destination:</label>
+            <input type="text" id="outputVideoInput" name="output_path" />
           </div>
           <div class="toggles-row">
-            <label class="checkbox-label">
-              <input type="checkbox" id="centerOnlyToggle" checked />
+            <label for="centerOnlyToggle" class="checkbox-label">
+              <input type="checkbox" id="centerOnlyToggle" name="center_channel_only" checked />
               <span>Mute Center-Channel Only (5.1 surround dialog preservation)</span>
             </label>
-            <label class="checkbox-label">
-              <input type="checkbox" id="cleanSrtToggle" checked />
+            <label for="cleanSrtToggle" class="checkbox-label">
+              <input type="checkbox" id="cleanSrtToggle" name="generate_clean_srt" checked />
               <span>Generate Cleaned Subtitles (<code>.Cleaned.srt</code>)</span>
             </label>
-            <label class="checkbox-label">
-              <input type="checkbox" id="wordTimingToggle" checked />
+            <label for="wordTimingToggle" class="checkbox-label">
+              <input type="checkbox" id="wordTimingToggle" name="targeted_word_timing" checked />
               <span>Targeted Word Timing (only mute the swear word, not the whole sentence)</span>
             </label>
           </div>
@@ -262,6 +272,93 @@
         <button id="cancelProcessBtn" class="btn-danger">Cancel Processing</button>
       </div>
     </div>
+
+    <!-- Trusted Online Subtitle Search Dialog -->
+    <dialog id="subtitleSearchDialog" class="sub-dialog" closedby="any" aria-labelledby="subtitleDialogTitle">
+      <div class="sub-dialog-header">
+        <h2 id="subtitleDialogTitle">Search Trusted Subtitles</h2>
+        <form method="dialog">
+          <button type="submit" class="btn-close" aria-label="Close subtitle search">&times;</button>
+        </form>
+      </div>
+
+      <search>
+        <form id="subtitleSearchForm" class="sub-search-form">
+          <div class="sub-search-grid">
+            <div class="control-group sub-field-wide">
+              <label for="subSearchTitle">Movie or Series Title</label>
+              <input type="text" id="subSearchTitle" name="title" placeholder="Auto-parsed from video filename or enter title" />
+            </div>
+            <div class="control-group">
+              <label for="subSearchYear">Year</label>
+              <input type="number" id="subSearchYear" name="year" min="1900" max="2035" placeholder="e.g. 2019" />
+            </div>
+            <div class="control-group">
+              <label for="subSearchSeason">Season</label>
+              <input type="number" id="subSearchSeason" name="season" min="0" placeholder="Optional" />
+            </div>
+            <div class="control-group">
+              <label for="subSearchEpisode">Episode</label>
+              <input type="number" id="subSearchEpisode" name="episode" min="0" placeholder="Optional" />
+            </div>
+            <div class="control-group">
+              <label for="subSearchImdb">IMDb ID</label>
+              <input type="text" id="subSearchImdb" name="imdb_id" placeholder="e.g. tt0133093" />
+            </div>
+            <div class="control-group">
+              <label for="subSearchLang">Language</label>
+              <select id="subSearchLang" name="language">
+                <option value="en" selected>English (en)</option>
+                <option value="es">Spanish (es)</option>
+                <option value="fr">French (fr)</option>
+                <option value="de">German (de)</option>
+                <option value="it">Italian (it)</option>
+                <option value="pt">Portuguese (pt)</option>
+                <option value="nl">Dutch (nl)</option>
+                <option value="ja">Japanese (ja)</option>
+                <option value="ko">Korean (ko)</option>
+                <option value="ar">Arabic (ar)</option>
+                <option value="hi">Hindi (hi)</option>
+              </select>
+            </div>
+          </div>
+          <div class="sub-search-actions">
+            <button type="submit" id="runSubSearchBtn" class="btn-primary">Search Providers</button>
+            <span id="subSearchStatus" class="status-msg" role="status" aria-live="polite"></span>
+          </div>
+        </form>
+      </search>
+
+      <details class="api-keys-details">
+        <summary>Optional Provider Credentials (OpenSubtitles &amp; SubDL API Keys)</summary>
+        <div class="api-keys-grid">
+          <div class="control-group">
+            <label for="subOsApiKeyInput">OpenSubtitles API Key</label>
+            <input type="password" id="subOsApiKeyInput" name="opensubtitles_api_key" autocomplete="off" placeholder="Optional API key" />
+          </div>
+          <div class="control-group">
+            <label for="subOsUserInput">OpenSubtitles Username</label>
+            <input type="text" id="subOsUserInput" name="opensubtitles_username" autocomplete="username" placeholder="Optional username" />
+          </div>
+          <div class="control-group">
+            <label for="subOsPassInput">OpenSubtitles Password</label>
+            <input type="password" id="subOsPassInput" name="opensubtitles_password" autocomplete="current-password" placeholder="Optional password" />
+          </div>
+          <div class="control-group">
+            <label for="subDlApiKeyInput">SubDL API Key</label>
+            <input type="password" id="subDlApiKeyInput" name="subdl_api_key" autocomplete="off" placeholder="Optional API key" />
+          </div>
+        </div>
+        <div class="api-keys-actions">
+          <button type="button" id="saveSubKeysBtn" class="btn-secondary">Save Provider Settings</button>
+          <span id="subKeysStatus" class="status-msg"></span>
+        </div>
+      </details>
+
+      <div class="sub-results-wrapper">
+        <ul id="subtitleResultsList" class="sub-results-list"></ul>
+      </div>
+    </dialog>
 
   </div>
 

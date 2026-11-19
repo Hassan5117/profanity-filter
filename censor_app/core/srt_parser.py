@@ -71,6 +71,10 @@ def strip_subtitle_tags(text: str) -> str:
     Remove HTML tags (<i>, <b>, <font>, etc.) and SSA/ASS style tags ({\\an8}, etc.)
     and unescape HTML entities.
     """
+    # Strip inline formatting tags inside a single word without inserting spaces
+    text = re.sub(r'(?<=\w)</?(?:i|b|u|s|font\b[^>]*)>(?=\w)', '', text, flags=re.IGNORECASE)
+    # Replace ASS/SSA line breaks (\N, \n) with spaces
+    text = re.sub(r'\\[Nn]', ' ', text)
     # Replace ASS/SSA curly bracket style tags e.g. {\an8}, {\c&HFFFFFF&} with a space
     text = re.sub(r'\{[^}]*\}', ' ', text)
     # Replace HTML tags e.g. <font color="...">, </i>, <br /> with a space
@@ -85,24 +89,36 @@ def strip_subtitle_tags(text: str) -> str:
 
 
 def read_subtitle_file_content(file_path: str) -> str:
-    """Read subtitle file trying multiple encodings: utf-8-sig, utf-8, latin-1, cp1252."""
-    encodings = ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
-    for enc in encodings:
+    """Read subtitle file trying BOMs (UTF-16, UTF-8), then utf-8, cp1252, latin-1."""
+    with open(file_path, 'rb') as f:
+        raw = f.read()
+
+    if raw.startswith((b'\xff\xfe', b'\xfe\xff')):
         try:
-            with open(file_path, 'r', encoding=enc) as f:
-                return f.read()
+            return raw.decode('utf-16')
+        except UnicodeDecodeError:
+            pass
+    if raw.startswith(b'\xef\xbb\xbf'):
+        try:
+            return raw.decode('utf-8-sig')
+        except UnicodeDecodeError:
+            pass
+
+    for enc in ('utf-8', 'cp1252', 'latin-1'):
+        try:
+            return raw.decode(enc)
         except UnicodeDecodeError:
             continue
-    # Fallback with replacement
-    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-        return f.read()
+
+    return raw.decode('utf-8', errors='replace')
 
 
 def parse_srt_content(content: str) -> List[SubtitleItem]:
     """Parse raw SRT/VTT text content into SubtitleItem objects."""
-    # Normalize line breaks
+    # Normalize line breaks and whitespace-only separator lines
     content = content.replace('\r\n', '\n').replace('\r', '\n')
-    
+    content = re.sub(r'^[ \t]+$', '', content, flags=re.MULTILINE)
+
     # Strip WEBVTT header if present
     if content.startswith("WEBVTT"):
         content = re.sub(r'^WEBVTT[^\n]*\n', '', content)

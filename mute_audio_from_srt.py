@@ -28,6 +28,8 @@ from censor_app.core.profanity_filter import ProfanityFilter, TIER_1_SEVERE, TIE
 from censor_app.core.timing import detect_profanities_in_subtitles, merge_intervals
 from censor_app.core.subtitle_writer import generate_cleaned_srt
 from censor_app.core.ffmpeg_engine import FFmpegEngine, FFmpegProbe
+from censor_app.core.config import Config
+from censor_app.core.subtitle_fetcher import SubtitleFetcher, normalize_language_codes
 
 
 DEFAULT_PROFANITY = TIER_1_SEVERE + TIER_2_MODERATE
@@ -44,20 +46,26 @@ def main():
                         help="List of words to mute. If not provided, standard profanity list is used.")
     parser.add_argument('--mode', choices=['mute', 'bleep', 'duck'], default='mute',
                         help="Censorship mode: mute (smooth silence), bleep (1000Hz tone), or duck (-24dB)")
-    parser.add_argument('--preset', choices=['strict', 'moderate', 'mild', 'all'], default='moderate',
-                        help="Profanity severity tier (default: moderate)")
-    parser.add_argument('--timing-mode', choices=['word', 'segment'], default='word',
+    parser.add_argument('--preset', choices=['strict', 'moderate', 'mild', 'all', 'custom'], default=None,
+                        help="Profanity severity tier (default: moderate, or custom when -w is given)")
+    parser.add_argument('--timing-mode', choices=['word', 'smart', 'segment'], default='word',
                         help="Targeted word timing vs full subtitle segment (default: word)")
-    parser.add_argument('--padding', type=float, default=0.30,
-                        help="Padding in seconds around word (default: 0.30)")
-    parser.add_argument('--lead-in', type=float, default=0.20,
-                        help="Mute onset lead-in in seconds (default: 0.20)")
+    parser.add_argument('--padding', type=float, default=0.18,
+                        help="Padding in seconds around word (default: 0.18)")
+    parser.add_argument('--lead-in', type=float, default=0.10,
+                        help="Mute onset lead-in in seconds (default: 0.10)")
     parser.add_argument('--sync-offset', type=float, default=0.0,
                         help="Global subtitle timing offset in seconds (+/-)")
+    parser.add_argument('--no-audio-refine', action='store_true',
+                        help="Disable acoustic waveform speech/pause alignment")
     parser.add_argument('--no-clean-srt', action='store_true',
                         help="Skip generating sanitized .srt file")
     parser.add_argument('--no-center-only', action='store_true',
                         help="Do not isolate Center dialogue channel on 5.1 surround")
+    parser.add_argument('--sub-lang', default=None,
+                        help="Preferred subtitle language for online fallback (default from config)")
+    parser.add_argument('--no-download-subs', action='store_true',
+                        help="Disable automatic online subtitle download when missing")
 
     args = parser.parse_args()
 
@@ -65,23 +73,47 @@ def main():
         print(f"Error: Input video '{args.input}' not found.")
         sys.exit(1)
 
+    if Path(args.input).resolve() == Path(args.output).resolve():
+        print("Error: Output video path must be different from input video path.")
+        sys.exit(1)
+
     srt_path = args.srt
     temp_srt = None
 
     if not srt_path or not os.path.exists(srt_path):
-        candidate = Path(args.input).with_suffix(".srt")
-        if candidate.exists():
-            srt_path = str(candidate)
-            print(f"[*] Auto-detected matching subtitle file: {srt_path}")
-        else:
-            streams = probe_subtitle_streams(args.input)
+        cfg = Config()
+        sub_lang = args.sub_lang or cfg.get("subtitle_language", "en") or "en"
+        iso1, iso2 = normalize_language_codes(sub_lang)
+        in_p = Path(args.input)
+        exts = []
+        for ext in (".srt", f".{iso1}.srt", f".{iso2}.srt", ".en.srt", ".eng.srt", ".vtt", f".{iso1}.vtt", ".en.vtt"):
+            if ext not in exts:
+                exts.append(ext)
+        for ext in exts:
+            candidate = in_p.parent / f"{in_p.stem}{ext}"
+            if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
+                srt_path = str(candidate)
+                print(f"[*] Auto-detected matching subtitle file: {srt_path}")
+                break
+
+        if not srt_path or not os.path.exists(srt_path):
+            streams = probe_subtitle_streams(args.input, text_only=True)
             if streams:
-                print(f"[*] Extracting embedded subtitle track (codec: {streams[0]['codec']})...")
-                temp_srt = extract_embedded_subtitle(args.input, stream_index=0)
+                sel = next((s for s in streams if s.get("language", "").lower() in ("eng", "en")), streams[0])
+                print(f"[*] Extracting embedded text subtitle track #{sel['sub_index']} (codec: {sel['codec']}, lang: {sel.get('language', 'und')})...")
+                temp_srt = extract_embedded_subtitle(args.input, stream_index=sel["sub_index"])
                 srt_path = temp_srt
-            else:
-                print(f"Error: SRT file '{args.srt}' not found and no embedded subtitles detected in video.")
-                sys.exit(1)
+            elif (cfg.get("auto_download_subtitles", True) if not args.no_download_subs else False):
+                print(f"[*] No local or embedded subtitles found; searching trusted online sources ({sub_lang})...")
+                fetcher = SubtitleFetcher(config=cfg, logger=print)
+                dl_res = fetcher.auto_fetch_subtitle_for_video(args.input, language=sub_lang)
+                if dl_res:
+                    srt_path = dl_res.srt_path
+                    print(f"[*] Downloaded subtitle from {dl_res.provider} ({dl_res.cue_count} cues) -> {srt_path}")
+
+        if not srt_path or not os.path.exists(srt_path):
+            print(f"Error: SRT file '{args.srt}' not found and no embedded or downloadable text subtitles detected in video.")
+            sys.exit(1)
 
     try:
         # Step 1: Parse subtitles
@@ -89,12 +121,15 @@ def main():
         if not subs:
             print("[*] Subtitle file contains no valid entries. Copying video without changes.")
             engine = FFmpegEngine()
-            engine.run_censor(args.input, args.output, intervals=[])
+            if not engine.run_censor(args.input, args.output, intervals=[]):
+                print(f"\nAn error occurred while copying video: {engine.last_error}")
+                sys.exit(1)
             return
 
         # Step 2: Configure filter
         custom_words = args.words if args.words else []
-        pf = ProfanityFilter(preset=args.preset, custom_words=custom_words)
+        effective_preset = args.preset if args.preset is not None else ("custom" if custom_words else "moderate")
+        pf = ProfanityFilter(preset=effective_preset, custom_words=custom_words)
 
         detections = detect_profanities_in_subtitles(
             subtitles=subs,
@@ -103,13 +138,18 @@ def main():
             padding_before=args.padding,
             padding_after=args.padding,
             lead_in=args.lead_in,
-            sync_offset=args.sync_offset
+            sync_offset=args.sync_offset,
+            video_path=args.input,
+            audio_refine=not args.no_audio_refine,
+            center_channel_only=not args.no_center_only,
         )
 
         if not detections:
-            print("No profanity found in the SRT file. No action needed.")
+            print("No profanity found in the SRT file. Copying video without changes.")
             engine = FFmpegEngine()
-            engine.run_censor(args.input, args.output, intervals=[])
+            if not engine.run_censor(args.input, args.output, intervals=[]):
+                print(f"\nAn error occurred while copying video: {engine.last_error}")
+                sys.exit(1)
             return
 
         intervals = [(d.mute_start, d.mute_end) for d in detections]
@@ -141,7 +181,8 @@ def main():
                 generate_cleaned_srt(subs, pf, out_srt)
                 print(f"Sanitized subtitles saved to: {out_srt}")
         else:
-            print("\nAn error occurred while running FFmpeg.")
+            err = f": {engine.last_error}" if engine.last_error else "."
+            print(f"\nAn error occurred while running FFmpeg{err}")
             sys.exit(1)
 
     finally:

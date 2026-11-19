@@ -23,6 +23,11 @@ wheels/
 venv/
 .venv/
 
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
 # App local data & caches
 uploads/
 .cache/

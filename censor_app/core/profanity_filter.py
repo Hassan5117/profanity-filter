@@ -61,21 +61,19 @@ TIER_3_MILD = [
 
 # Patterns for pre-censored / masked profanities commonly found in subtitle files
 MASKED_PATTERNS = [
-    # f***, f**k, f*ck, f---, f...ing, etc.
-    (r'\bf[\*#@\-\.]{1,5}(?:ing|ed|er|s)?(?![a-zA-Z0-9])', "fuck", "strict"),
-    (r'\bmother[\-\s]?f[\*#@\-\.]{1,6}(?:er|ers|ing)?(?![a-zA-Z0-9])', "motherfucker", "strict"),
-    (r'\bc[\*#@\-\.]{1,4}t(?![a-zA-Z0-9])', "cunt", "strict"),
-    (r'\bp[\*#@\-\.]{1,5}y(?![a-zA-Z0-9])', "pussy", "strict"),
-    (r'\bsh[\*#@\-\.]{1,3}t(?![a-zA-Z0-9])', "shit", "moderate"),
-    (r'\bs[\*#@\-\.]{1,4}t(?![a-zA-Z0-9])', "shit", "moderate"),
-    (r'\bb[\*#@\-\.]{1,5}h(?![a-zA-Z0-9])', "bitch", "moderate"),
-    (r'\bb[\*#@\-\.]{2,5}(?![a-zA-Z0-9])', "bitch", "moderate"),
-    (r'\ba[\*#@\-\.]{1,3}hole(?![a-zA-Z0-9])', "asshole", "moderate"),
-    (r'\ba[\*#@\-\.]{2}(?![a-zA-Z0-9])', "ass", "moderate"),
-    (r'\ba\$\$|\ba\$\$hole(?![a-zA-Z0-9])', "asshole", "moderate"),
-    (r'\bd[\*#@\-\.]{1,4}k(?![a-zA-Z0-9])', "dick", "moderate"),
-    (r'\bg[\*#@\-\.]{1,3}damn(?![a-zA-Z0-9])', "goddamn", "mild"),
-    (r'\bd[\*#@\-\.]{1,4}n(?![a-zA-Z0-9])', "damn", "mild")
+    (r'\bmother[\-\s]?f(?:[\*#@\$]{1,6}c?k?|-{2,5}k?)(?:er|ers|ing|in\'?)?(?![a-zA-Z0-9\*#@\$])', "motherfucker", "strict"),
+    (r'\bf(?:[\*#@\$]{1,5}c?k?|-{2,4}k?)(?:ing|in\'?|ed|er|ers|s)?(?![a-zA-Z0-9\*#@\$])', "fuck", "strict"),
+    (r'\bc(?:[\*#@\$]{1,4}n?|-{2,3}n?)t(?![a-zA-Z0-9\*#@\$])', "cunt", "strict"),
+    (r'\bp[\*#@\$]{1,5}s{0,2}y(?![a-zA-Z0-9\*#@\$])', "pussy", "strict"),
+    (r'\bsh(?:[\*#@\$]{1,3}|-{2,3})t(?:ty|ting|s)?(?![a-zA-Z0-9\*#@\$])', "shit", "moderate"),
+    (r'\bs[\*#@\$]{2,4}t(?:ty|ting|s)?(?![a-zA-Z0-9\*#@\$])', "shit", "moderate"),
+    (r'\bb(?:[\*#@\$]{1,5}|-{2,4})t?c?h(?:es|ing|y)?(?![a-zA-Z0-9\*#@\$])', "bitch", "moderate"),
+    (r'\bb[\*#@\$]{2,5}(?:es|ing|y)?(?![a-zA-Z0-9\*#@\$])', "bitch", "moderate"),
+    (r'\ba(?:[\*#@\$]{1,3}|-{2})holes?(?![a-zA-Z0-9\*#@\$])', "asshole", "moderate"),
+    (r'\ba[\*#@\$]{2}(?![a-zA-Z0-9\*#@\$])', "ass", "moderate"),
+    (r'\bd[\*#@\$]{1,4}c?k(?:head)?s?(?![a-zA-Z0-9\*#@\$])', "dick", "moderate"),
+    (r'\bg[\*#@\$]{1,3}d?damn(?:ed|it)?(?![a-zA-Z0-9\*#@\$])', "goddamn", "mild"),
+    (r'\bd[\*#@\$]{1,4}mn?(?![a-zA-Z0-9\*#@\$])', "damn", "mild"),
 ]
 
 # Whitelist to prevent Scunthorpe false positives
@@ -144,10 +142,14 @@ class ProfanityFilter:
         # e.g. "son of a bitch" before "bitch", "motherfucker" before "fuck"
         sorted_words = sorted(self.word_tier_map.keys(), key=len, reverse=True)
         if sorted_words:
-            escaped = [re.escape(w) for w in sorted_words]
-            # Replace escaped spaces with \s+ so multi-space or newline matches
-            escaped = [p.replace(r'\ ', r'\s+') for p in escaped]
-            regex_str = r'\b(' + '|'.join(escaped) + r')\b'
+            wrapped_parts = []
+            for raw_w in sorted_words:
+                # Replace escaped spaces with \s+ so multi-space or newline matches
+                p = re.escape(raw_w).replace(r'\ ', r'\s+')
+                left = r'\b' if re.match(r'^\w', raw_w) else r'(?<!\w)'
+                right = r'\b' if re.search(r'\w$', raw_w) else r'(?!\w)'
+                wrapped_parts.append(f"{left}{p}{right}")
+            regex_str = '(?:' + '|'.join(wrapped_parts) + ')'
             self.pattern = re.compile(regex_str, re.IGNORECASE)
         else:
             self.pattern = None
@@ -163,6 +165,8 @@ class ProfanityFilter:
         if not text:
             return []
 
+        # Normalize curly apostrophes (1-to-1 length preserved) for matching
+        search_text = text.replace('\u2019', "'").replace('\u2018', "'")
         matches = []
         occupied_spans: List[tuple] = []
 
@@ -171,8 +175,9 @@ class ProfanityFilter:
 
         # 1. Check primary word list
         if self.pattern:
-            for match in self.pattern.finditer(text):
-                word_found = match.group(1).lower()
+            for match in self.pattern.finditer(search_text):
+                s, e = match.start(), match.end()
+                word_found = match.group(0).lower()
                 # Normalize spaces for dictionary lookup
                 norm_key = re.sub(r'\s+', ' ', word_found)
                 if norm_key in self.whitelist:
@@ -181,33 +186,36 @@ class ProfanityFilter:
                 tier = self.word_tier_map.get(norm_key, "moderate")
                 matches.append(ProfanityMatch(
                     word=norm_key,
-                    matched_text=match.group(0),
-                    start_char=match.start(),
-                    end_char=match.end(),
-                    tier=tier
-                ))
-                occupied_spans.append((match.start(), match.end()))
-
-        # 2. Check masked / starred patterns (e.g. f***, sh*t)
-        for pattern_re, norm_word, tier in self.compiled_masked:
-            # Check tier eligibility based on preset
-            if self.preset == "strict" and tier != "strict":
-                continue
-            if self.preset == "moderate" and tier not in ["strict", "moderate"]:
-                continue
-
-            for match in pattern_re.finditer(text):
-                s, e = match.start(), match.end()
-                if overlaps(s, e):
-                    continue
-                matches.append(ProfanityMatch(
-                    word=norm_word,
-                    matched_text=match.group(0),
+                    matched_text=text[s:e],
                     start_char=s,
                     end_char=e,
                     tier=tier
                 ))
                 occupied_spans.append((s, e))
+
+        # 2. Check masked / starred patterns (e.g. f***, sh*t) for built-in presets
+        if self.preset in ("strict", "moderate", "mild", "all"):
+            for pattern_re, norm_word, tier in self.compiled_masked:
+                # Check tier eligibility based on preset
+                if self.preset == "strict" and tier != "strict":
+                    continue
+                if self.preset == "moderate" and tier not in ("strict", "moderate"):
+                    continue
+                if norm_word in self.whitelist:
+                    continue
+
+                for match in pattern_re.finditer(search_text):
+                    s, e = match.start(), match.end()
+                    if overlaps(s, e):
+                        continue
+                    matches.append(ProfanityMatch(
+                        word=norm_word,
+                        matched_text=text[s:e],
+                        start_char=s,
+                        end_char=e,
+                        tier=tier
+                    ))
+                    occupied_spans.append((s, e))
 
         # Sort matches by start position
         matches.sort(key=lambda m: m.start_char)
