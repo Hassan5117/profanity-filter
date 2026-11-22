@@ -171,6 +171,7 @@ class FFmpegProbe:
                 except (ValueError, TypeError):
                     duration = 0.0
 
+            audio_codec = ""
             audio_channels = 2
             channel_layout = "stereo"
             sample_rate = 48000
@@ -184,6 +185,7 @@ class FFmpegProbe:
                     audio_streams.append(s)
                     if not first_audio_seen:
                         first_audio_seen = True
+                        audio_codec = (s.get("codec_name") or "").lower()
                         if "channels" in s:
                             try:
                                 audio_channels = int(s["channels"])
@@ -207,6 +209,7 @@ class FFmpegProbe:
 
             return {
                 "duration": duration,
+                "audio_codec": audio_codec,
                 "audio_channels": audio_channels,
                 "channel_layout": channel_layout,
                 "sample_rate": sample_rate,
@@ -219,6 +222,7 @@ class FFmpegProbe:
         except Exception as e:
             return {
                 "duration": 0.0,
+                "audio_codec": "",
                 "audio_channels": 2,
                 "channel_layout": "stereo",
                 "sample_rate": 48000,
@@ -473,7 +477,10 @@ class FFmpegEngine:
 
         if not intervals:
             try:
-                cmd = [get_ffmpeg_path(), "-y", "-nostdin", "-i", input_video, "-c", "copy", temp_output]
+                cmd = [get_ffmpeg_path(), "-y", "-nostdin", "-i", input_video, "-c", "copy"]
+                if out_ext in (".mp4", ".m4v", ".mov"):
+                    cmd.extend(["-movflags", "+faststart"])
+                cmd.append(temp_output)
                 res = subprocess.run(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -539,7 +546,8 @@ class FFmpegEngine:
             if out_ext in (".mp4", ".m4v", ".mov") and vcodec == "hevc" and vtag not in ("hvc1", "dvh1", "dvhe"):
                 cmd.extend(["-tag:v", "hvc1"])
 
-            # Select container-compatible audio codec
+            # Select container-compatible audio codec; preserve AAC 5.1 for Direct Play compatibility
+            src_acodec = (media_info.get("audio_codec") or "").lower()
             if out_ext == ".webm":
                 if is_surround:
                     cmd.extend(["-c:a", "libopus", "-mapping_family", "1", "-b:a", "256k"])
@@ -547,10 +555,15 @@ class FFmpegEngine:
                     cmd.extend(["-c:a", "libopus", "-b:a", "192k"])
             elif is_surround and out_ext == ".avi":
                 cmd.extend(["-c:a", "ac3", "-b:a", "640k"])
+            elif is_surround and src_acodec == "aac":
+                cmd.extend(["-c:a", "aac", "-b:a", "384k"])
             elif is_surround:
                 cmd.extend(["-c:a", "eac3", "-b:a", "640k"])
             else:
                 cmd.extend(["-c:a", "aac", "-b:a", "320k"])
+
+            if out_ext in (".mp4", ".m4v", ".mov"):
+                cmd.extend(["-movflags", "+faststart"])
 
             # Progress pipe
             cmd.extend(["-progress", "pipe:1", "-nostats", temp_output])

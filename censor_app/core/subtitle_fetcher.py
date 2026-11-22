@@ -27,7 +27,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from censor_app.core.config import Config
 from censor_app.core.srt_parser import format_timestamp, parse_srt_content
@@ -688,6 +688,50 @@ def _atomic_write_text(dest_path: Path, content: str) -> None:
                 pass
 
 
+_SOURCE_FAMILY_PATTERNS: Tuple[Tuple[str, re.Pattern], ...] = (
+    ("cam", re.compile(r"(?:^|[^a-z0-9])(?:hdcam|camrip|telesync|hdts|tsrip)(?=$|[^a-z0-9])")),
+    ("dvd", re.compile(r"(?:^|[^a-z0-9])(?:dvdrip|dvdscr|dvd)(?=$|[^a-z0-9])")),
+    ("hdtv", re.compile(r"(?:^|[^a-z0-9])(?:hdtv|pdtv)(?=$|[^a-z0-9])")),
+    ("bluray", re.compile(r"(?:^|[^a-z0-9])(?:bluray|blu-ray|bdrip|brrip|remux|uhd)(?=$|[^a-z0-9])")),
+    ("web", re.compile(r"(?:^|[^a-z0-9])(?:web-dl|webdl|webrip|web|amzn|nf|dsnp|atvp|hmax|pcok)(?=$|[^a-z0-9])")),
+)
+
+_EDITION_PATTERNS: Tuple[Tuple[str, re.Pattern], ...] = (
+    ("extended", re.compile(r"(?:^|[^a-z0-9])extended(?=$|[^a-z0-9])")),
+    ("directors", re.compile(r"(?:^|[^a-z0-9])directors?(?=$|[^a-z0-9])")),
+    ("unrated", re.compile(r"(?:^|[^a-z0-9])unrated(?=$|[^a-z0-9])")),
+    ("imax", re.compile(r"(?:^|[^a-z0-9])imax(?=$|[^a-z0-9])")),
+    ("remastered", re.compile(r"(?:^|[^a-z0-9])remastered(?=$|[^a-z0-9])")),
+)
+
+
+def _extract_source_family(text: str) -> Optional[str]:
+    """Identify the video source family (cam, dvd, hdtv, bluray, web) from a release string."""
+    lower = text.lower()
+    for family, rx in _SOURCE_FAMILY_PATTERNS:
+        if rx.search(lower):
+            return family
+    return None
+
+
+def _extract_editions(text: str) -> Set[str]:
+    """Extract cut/edition tags (e.g., extended, directors, imax) from a release string."""
+    lower = text.lower()
+    return {edition for edition, rx in _EDITION_PATTERNS if rx.search(lower)}
+
+
+def _normalize_release_tokens(text: str) -> Set[str]:
+    """Tokenize a release string and normalize synonymous release group tags."""
+    tokens = set()
+    for tok in re.split(r"[^a-z0-9]+", text.lower()):
+        if len(tok) < 3:
+            continue
+        if tok == "yify":
+            tok = "yts"
+        tokens.add(tok)
+    return tokens
+
+
 def score_candidate(candidate: SubtitleCandidate, query: MediaQuery) -> float:
     """Compute a deterministic relevance score favoring hash matches and exact release/episode matches."""
     score = 0.0
@@ -702,6 +746,7 @@ def score_candidate(candidate: SubtitleCandidate, query: MediaQuery) -> float:
     if candidate.hash_matched:
         score += 200.0
 
+    cand_rel_text = f"{candidate.release_name} {candidate.file_name or ''}".lower()
     rel_lower = f"{candidate.release_name} {candidate.file_name or ''} {candidate.title}".lower()
 
     if query.season is not None and query.episode is not None:
@@ -720,24 +765,33 @@ def score_candidate(candidate: SubtitleCandidate, query: MediaQuery) -> float:
         elif abs(candidate.year - query.year) > 1:
             score -= 60.0
 
+    title_tokens = (
+        {t for t in re.split(r"[^a-z0-9]+", query.title.lower()) if len(t) >= 2}
+        if query.title
+        else set()
+    )
+
     if query.release_name:
-        q_tokens = {
-            t for t in re.split(r"[^a-z0-9]+", query.release_name.lower()) if len(t) >= 3
-        }
-        r_tokens = {
-            t for t in re.split(r"[^a-z0-9]+", rel_lower) if len(t) >= 3
-        }
+        q_tokens = _normalize_release_tokens(query.release_name) - title_tokens
+        r_tokens = _normalize_release_tokens(cand_rel_text) - title_tokens
         overlap = len(q_tokens & r_tokens)
         score += min(60.0, overlap * 12.0)
 
-    if query.title:
-        title_tokens = {
-            t for t in re.split(r"[^a-z0-9]+", query.title.lower()) if len(t) >= 2
-        }
+        q_source = _extract_source_family(query.release_name)
+        c_source = _extract_source_family(cand_rel_text)
+        if q_source is not None and c_source is not None:
+            score += 25.0 if q_source == c_source else -25.0
+
+        q_editions = _extract_editions(query.release_name)
+        c_editions = _extract_editions(cand_rel_text)
+        if q_editions or c_editions:
+            score += 35.0 if (q_editions & c_editions) else -40.0
+
+    if title_tokens:
         c_title_tokens = {
             t for t in re.split(r"[^a-z0-9]+", candidate.title.lower()) if len(t) >= 2
         }
-        if title_tokens and c_title_tokens:
+        if c_title_tokens:
             jaccard = len(title_tokens & c_title_tokens) / max(len(title_tokens), 1)
             score += jaccard * 40.0
 
@@ -748,10 +802,10 @@ def score_candidate(candidate: SubtitleCandidate, query: MediaQuery) -> float:
         score += min(25.0, math.log10(candidate.downloads + 1) * 7.5)
 
     provider_weights = {
-        "opensubtitles": 10.0,
-        "subdl": 8.0,
-        "stremio_opensubtitles": 6.0,
-        "podnapisi": 4.0,
+        "opensubtitles": 15.0,
+        "subdl": 10.0,
+        "podnapisi": 5.0,
+        "stremio_opensubtitles": 2.0,
     }
     score += provider_weights.get(candidate.provider, 0.0)
     candidate.score = round(score, 2)
@@ -1043,7 +1097,7 @@ class SubtitleFetcher:
                         year=query.year,
                         season=query.season,
                         episode=query.episode,
-                        hash_matched=is_hash_query,
+                        hash_matched=False,
                         download_url=dl_url,
                     )
                 )

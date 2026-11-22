@@ -279,6 +279,65 @@ class TestSubtitleFetcher(unittest.TestCase):
         query = MediaQuery(title="Matrix", year=1999)
         self.assertEqual(fetcher._search_podnapisi(query), [])
 
+    def test_opensubtitles_release_match_beats_stremio_and_mismatched_source(self):
+        self.config.set("opensubtitles_api_key", "os-key")
+        video_file = self.tmp_path / "Gone.In.The.Night.2022.1080p.WEBRip.x264.AAC5.1-[YTS.MX].mp4"
+        video_file.write_bytes(b"\x02" * (65536 * 2))
+
+        def mock_http(url, method="GET", headers=None, body=None, timeout=10.0, max_bytes=10485760):
+            if "api.opensubtitles.com/api/v1/subtitles" in url:
+                return 200, {}, json.dumps({
+                    "data": [
+                        {
+                            "id": "101",
+                            "attributes": {
+                                "language": "en",
+                                "release": "Gone.In.The.Night.2022.DVDRip.XviD",
+                                "download_count": 5000,
+                                "moviehash_match": False,
+                                "feature_details": {"movie_name": "Gone in the Night", "year": 2022},
+                                "files": [{"file_id": 1001, "file_name": "gone.dvdrip.srt"}],
+                            },
+                        },
+                        {
+                            "id": "102",
+                            "attributes": {
+                                "language": "en",
+                                "release": "Gone.In.The.Night.2022.1080p.WEBRip.YIFY",
+                                "download_count": 200,
+                                "moviehash_match": False,
+                                "feature_details": {"movie_name": "Gone in the Night", "year": 2022},
+                                "files": [{"file_id": 1002, "file_name": "gone.webrip.yify.srt"}],
+                            },
+                        },
+                    ]
+                }).encode("utf-8")
+            if "v3.sg.media-imdb.com/suggestion" in url:
+                return 200, {}, json.dumps({
+                    "d": [{"id": "tt14463484", "l": "Gone in the Night", "y": 2022, "qid": "movie"}]
+                }).encode("utf-8")
+            if "opensubtitles-v3.strem.io/subtitles/movie/tt14463484" in url:
+                return 200, {}, json.dumps({
+                    "subtitles": [{
+                        "id": "999999",
+                        "url": "https://subs5.strem.io/sub/999999.srt",
+                        "lang": "eng",
+                    }]
+                }).encode("utf-8")
+            return 404, {}, b""
+
+        fetcher = SubtitleFetcher(config=self.config, http_client=mock_http)
+        query = parse_media_query(str(video_file), compute_hash=True)
+        ranked = fetcher.search(query)
+
+        stremio_cands = [c for c in ranked if c.provider == "stremio_opensubtitles"]
+        self.assertTrue(stremio_cands)
+        for cand in stremio_cands:
+            self.assertFalse(cand.hash_matched)
+
+        self.assertEqual(ranked[0].provider, "opensubtitles")
+        self.assertEqual(ranked[0].subtitle_id, "102")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -371,6 +371,33 @@ This is a fucking test!
         info = FFmpegProbe.probe_media(out_bleep)
         self.assertTrue(info["is_surround"])
         self.assertEqual(info["audio_channels"], 6)
+        self.assertEqual(info["audio_codec"], "eac3")
+
+    def test_surround_51_aac_preserves_aac_and_faststart(self):
+        vid_51_aac = os.path.join(self.test_dir, "surround51_aac.mp4")
+        out_aac = os.path.join(self.test_dir, "surround51_aac.Cleaned.mp4")
+
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "testsrc=duration=2:size=160x120:rate=15",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+            "-filter_complex", "[1:a]pan=5.1|FL=c0|FR=c0|FC=c0|LFE=0.1*c0|BL=c0|BR=c0[a51]",
+            "-map", "0:v", "-map", "[a51]",
+            "-c:v", "libx264", "-c:a", "aac", "-b:a", "384k", vid_51_aac
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+        engine = FFmpegEngine()
+        ok = engine.run_censor(vid_51_aac, out_aac, [(0.5, 1.2)], mode="mute", center_channel_only=True)
+        self.assertTrue(ok)
+
+        info = FFmpegProbe.probe_media(out_aac)
+        self.assertEqual(info["audio_codec"], "aac")
+        self.assertEqual(info["audio_channels"], 6)
+        self.assertTrue(info["is_surround"])
+
+        with open(out_aac, "rb") as f:
+            raw = f.read()
+        self.assertLess(raw.index(b"moov"), raw.index(b"mdat"))
 
     def test_webm_censor(self):
         in_webm = os.path.join(self.test_dir, "clip.webm")
