@@ -110,9 +110,10 @@ class MediaWatcher:
             dl_res = None
 
         if dl_res and Path(dl_res.srt_path).exists():
+            desc = dl_res.candidate.release_name or dl_res.candidate.subtitle_id
             self.log(
                 f"Auto-downloaded subtitle for {video_path.name} from {dl_res.provider} "
-                f"({dl_res.cue_count} cues) -> {Path(dl_res.srt_path).name}"
+                f"({dl_res.candidate.title} | {desc}, {dl_res.cue_count} cues) -> {Path(dl_res.srt_path).name}"
             )
             self._waiting_for_subs.discard(key)
             return Path(dl_res.srt_path)

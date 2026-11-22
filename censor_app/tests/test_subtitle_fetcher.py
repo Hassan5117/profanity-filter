@@ -338,6 +338,169 @@ class TestSubtitleFetcher(unittest.TestCase):
         self.assertEqual(ranked[0].provider, "opensubtitles")
         self.assertEqual(ranked[0].subtitle_id, "102")
 
+    def test_opensubtitles_resolves_imdb_and_rejects_wrong_movie_title(self):
+        self.config.set("opensubtitles_api_key", "os-key")
+        query = parse_media_query(
+            "Gone.In.The.Night.2022.1080p.WEBRip.x264.AAC5.1-[YTS.MX].mp4",
+            compute_hash=False,
+        )
+
+        # Part 1: IMDb resolution path sends imdb_id=15426294 and prefers non-HI CMRG over HI
+        seen_os_urls = []
+
+        def mock_imdb_http(url, method="GET", headers=None, body=None, timeout=10.0, max_bytes=10485760):
+            if "v3.sg.media-imdb.com/suggestion" in url:
+                return 200, {}, json.dumps({
+                    "d": [{"id": "tt15426294", "l": "Gone in the Night", "y": 2022, "qid": "movie"}]
+                }).encode("utf-8")
+            if "api.opensubtitles.com/api/v1/subtitles" in url:
+                seen_os_urls.append(url)
+                return 200, {}, json.dumps({
+                    "data": [
+                        {
+                            "id": "hi-1",
+                            "attributes": {
+                                "language": "en",
+                                "release": "1080p.WEB-DL.DD5.1.H.264-CMRG",
+                                "download_count": 4250,
+                                "hearing_impaired": True,
+                                "moviehash_match": False,
+                                "feature_details": {
+                                    "movie_name": "2022 - Gone in the Night",
+                                    "title": "Gone in the Night",
+                                    "year": 2022,
+                                    "imdb_id": 15426294,
+                                },
+                                "files": [{"file_id": 7642718, "file_name": "Gone.In.The.Night.2022.1080p.WEB-DL.DD5.1.H.264-CMRG-HI"}],
+                            },
+                        },
+                        {
+                            "id": "clean-1",
+                            "attributes": {
+                                "language": "en",
+                                "release": "1080p.WEB-DL.DD5.1.H.264-CMRG",
+                                "download_count": 22135,
+                                "hearing_impaired": False,
+                                "moviehash_match": False,
+                                "feature_details": {
+                                    "movie_name": "2022 - Gone in the Night",
+                                    "title": "Gone in the Night",
+                                    "year": 2022,
+                                    "imdb_id": 15426294,
+                                },
+                                "files": [{"file_id": 7643023, "file_name": "Gone.In.The.Night.2022.1080p.WEB-DL.DD5.1.H.264-CMRG"}],
+                            },
+                        },
+                    ]
+                }).encode("utf-8")
+            return 404, {}, b""
+
+        fetcher1 = SubtitleFetcher(config=self.config, http_client=mock_imdb_http)
+        ranked1 = fetcher1.search(query, providers=["opensubtitles"])
+        self.assertTrue(seen_os_urls)
+        self.assertIn("imdb_id=15426294", seen_os_urls[0])
+        self.assertEqual(ranked1[0].subtitle_id, "clean-1")
+        self.assertEqual(ranked1[0].title, "Gone in the Night")
+        self.assertEqual(ranked1[0].imdb_id, "tt15426294")
+
+        # Part 2: Even when IMDb suggestion fails, wrong movie with YTS release string loses
+        def mock_text_fallback_http(url, method="GET", headers=None, body=None, timeout=10.0, max_bytes=10485760):
+            if "v3.sg.media-imdb.com/suggestion" in url:
+                return 404, {}, b""
+            if "api.opensubtitles.com/api/v1/subtitles" in url:
+                return 200, {}, json.dumps({
+                    "data": [
+                        {
+                            "id": "wrong-movie",
+                            "attributes": {
+                                "language": "en",
+                                "release": "Pacerville.2022.WEBRip.x264-YTS-YIFY",
+                                "download_count": 2986,
+                                "hearing_impaired": False,
+                                "moviehash_match": False,
+                                "feature_details": {
+                                    "movie_name": "2022 - Last the Night",
+                                    "year": 2022,
+                                    "imdb_id": 99999999,
+                                },
+                                "files": [{"file_id": 11111, "file_name": "Pacerville.2022.WEBRip.x264-YTS-YIFY"}],
+                            },
+                        },
+                        {
+                            "id": "right-movie",
+                            "attributes": {
+                                "language": "en",
+                                "release": "1080p.WEB-DL.DD5.1.H.264-CMRG",
+                                "download_count": 22135,
+                                "hearing_impaired": False,
+                                "moviehash_match": False,
+                                "feature_details": {
+                                    "movie_name": "2022 - Gone in the Night",
+                                    "year": 2022,
+                                    "imdb_id": 15426294,
+                                },
+                                "files": [{"file_id": 7643023, "file_name": "Gone.In.The.Night.2022.1080p.WEB-DL.DD5.1.H.264-CMRG"}],
+                            },
+                        },
+                    ]
+                }).encode("utf-8")
+            return 404, {}, b""
+
+        fetcher2 = SubtitleFetcher(config=self.config, http_client=mock_text_fallback_http)
+        ranked2 = fetcher2.search(query, providers=["opensubtitles"])
+        self.assertEqual(ranked2[0].subtitle_id, "right-movie")
+        self.assertEqual(ranked2[0].title, "Gone in the Night")
+
+    def test_stremio_parses_release_filename_and_hash_flag(self):
+        def mock_stremio_http(url, method="GET", headers=None, body=None, timeout=10.0, max_bytes=10485760):
+            if "opensubtitles-v3.strem.io/subtitles/movie/tt15426294" in url:
+                return 200, {}, json.dumps({
+                    "subtitles": [
+                        {
+                            "id": "9191536",
+                            "url": "https://subs5.strem.io/en/download/subencoding-stremio-utf8/src-api/file/1957763302",
+                            "lang": "eng",
+                            "m": "i",
+                            "subtitleFileName": "Gone.In.The.Night.2022.1080p.WEB-DL.DD5.1.H.264-CMRG-HI.srt",
+                            "movieReleaseName": "1080p.WEB-DL.DD5.1.H.264-CMRG",
+                        },
+                        {
+                            "id": "9191538",
+                            "url": "https://subs5.strem.io/en/download/subencoding-stremio-utf8/src-api/file/1957763301",
+                            "lang": "eng",
+                            "m": "h",
+                            "subtitleFileName": "Gone.In.The.Night.2022.1080p.WEB-DL.DD5.1.H.264-CMRG.srt",
+                            "movieReleaseName": "1080p.WEB-DL.DD5.1.H.264-CMRG",
+                        },
+                    ]
+                }).encode("utf-8")
+            return 404, {}, b""
+
+        fetcher = SubtitleFetcher(config=self.config, http_client=mock_stremio_http)
+        query = MediaQuery(
+            title="Gone In The Night",
+            year=2022,
+            imdb_id="tt15426294",
+            movie_hash="0123456789abcdef",
+            movie_bytesize=123456789,
+            release_name="Gone.In.The.Night.2022.1080p.WEBRip.x264.AAC5.1-[YTS.MX]",
+        )
+        ranked = fetcher.search(query, providers=["stremio_opensubtitles"])
+        by_id = {c.subtitle_id: c for c in ranked}
+
+        self.assertFalse(by_id["9191536"].hash_matched)
+        self.assertTrue(by_id["9191536"].hearing_impaired)
+        self.assertEqual(by_id["9191536"].release_name, "1080p.WEB-DL.DD5.1.H.264-CMRG")
+        self.assertEqual(
+            by_id["9191536"].file_name,
+            "Gone.In.The.Night.2022.1080p.WEB-DL.DD5.1.H.264-CMRG-HI.srt",
+        )
+
+        self.assertTrue(by_id["9191538"].hash_matched)
+        self.assertFalse(by_id["9191538"].hearing_impaired)
+        self.assertEqual(by_id["9191538"].imdb_id, "tt15426294")
+        self.assertEqual(ranked[0].subtitle_id, "9191538")
+
 
 if __name__ == "__main__":
     unittest.main()

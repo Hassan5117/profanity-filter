@@ -261,6 +261,7 @@ class SubtitleCandidate:
     download_url: Optional[str] = None
     download_id: Optional[str] = None
     file_name: Optional[str] = None
+    imdb_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -732,6 +733,31 @@ def _normalize_release_tokens(text: str) -> Set[str]:
     return tokens
 
 
+def _normalize_imdb_id(raw: Any) -> Optional[str]:
+    """Normalize IMDb identifiers ('tt15426294', '15426294', 15426294) to canonical 'tt<int>'."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    text = str(raw).strip().lower()
+    if text.startswith("tt"):
+        text = text[2:]
+    if not text.isdigit():
+        return None
+    num = int(text)
+    if num <= 0:
+        return None
+    return f"tt{num}"
+
+
+def _clean_candidate_title(title: str) -> str:
+    """Strip leading OpenSubtitles year prefixes such as '2022 - '."""
+    return re.sub(r"^\s*(?:19|20)\d{2}\s*[-:]\s*", "", title).strip()
+
+
+def _normalize_title_text(title: str) -> str:
+    """Normalize a cleaned title to lowercase alphanumeric words."""
+    return re.sub(r"[^a-z0-9]+", " ", _clean_candidate_title(title).lower()).strip()
+
+
 def score_candidate(candidate: SubtitleCandidate, query: MediaQuery) -> float:
     """Compute a deterministic relevance score favoring hash matches and exact release/episode matches."""
     score = 0.0
@@ -745,6 +771,16 @@ def score_candidate(candidate: SubtitleCandidate, query: MediaQuery) -> float:
 
     if candidate.hash_matched:
         score += 200.0
+
+    imdb_matched = False
+    q_imdb = _normalize_imdb_id(query.imdb_id)
+    c_imdb = _normalize_imdb_id(candidate.imdb_id)
+    if q_imdb is not None and c_imdb is not None:
+        if q_imdb == c_imdb:
+            imdb_matched = True
+            score += 15.0
+        else:
+            score -= 250.0
 
     cand_rel_text = f"{candidate.release_name} {candidate.file_name or ''}".lower()
     rel_lower = f"{candidate.release_name} {candidate.file_name or ''} {candidate.title}".lower()
@@ -765,11 +801,9 @@ def score_candidate(candidate: SubtitleCandidate, query: MediaQuery) -> float:
         elif abs(candidate.year - query.year) > 1:
             score -= 60.0
 
-    title_tokens = (
-        {t for t in re.split(r"[^a-z0-9]+", query.title.lower()) if len(t) >= 2}
-        if query.title
-        else set()
-    )
+    q_norm_title = _normalize_title_text(query.title) if query.title else ""
+    c_norm_title = _normalize_title_text(candidate.title) if candidate.title else ""
+    title_tokens = {t for t in q_norm_title.split() if len(t) >= 2} if q_norm_title else set()
 
     if query.release_name:
         q_tokens = _normalize_release_tokens(query.release_name) - title_tokens
@@ -787,16 +821,26 @@ def score_candidate(candidate: SubtitleCandidate, query: MediaQuery) -> float:
         if q_editions or c_editions:
             score += 35.0 if (q_editions & c_editions) else -40.0
 
-    if title_tokens:
-        c_title_tokens = {
-            t for t in re.split(r"[^a-z0-9]+", candidate.title.lower()) if len(t) >= 2
-        }
+    if title_tokens and c_norm_title:
+        c_title_tokens = {t for t in c_norm_title.split() if len(t) >= 2}
         if c_title_tokens:
-            jaccard = len(title_tokens & c_title_tokens) / max(len(title_tokens), 1)
-            score += jaccard * 40.0
+            if q_norm_title == c_norm_title:
+                score += 60.0
+            else:
+                union_len = len(title_tokens | c_title_tokens)
+                jaccard = len(title_tokens & c_title_tokens) / max(union_len, 1)
+                if jaccard >= 0.8:
+                    score += 45.0
+                elif jaccard >= 0.5:
+                    score += jaccard * 30.0
+                elif not candidate.hash_matched and not imdb_matched:
+                    score -= 150.0
 
     if candidate.foreign_parts_only or "forced" in rel_lower:
         score -= 80.0
+
+    if candidate.hearing_impaired:
+        score -= 6.0
 
     if candidate.downloads > 0:
         score += min(25.0, math.log10(candidate.downloads + 1) * 7.5)
@@ -913,37 +957,52 @@ class SubtitleFetcher:
             return []
 
         iso1, _ = normalize_language_codes(query.language)
-        params: Dict[str, Any] = {"languages": iso1}
-        if query.movie_hash:
-            params["moviehash"] = query.movie_hash
-        if query.imdb_id and query.imdb_id.startswith("tt") and query.imdb_id[2:].isdigit():
-            params["imdb_id"] = str(int(query.imdb_id[2:]))
-        elif query.title:
-            params["query"] = query.title
-        if query.year is not None:
-            params["year"] = str(query.year)
-        if query.season is not None:
-            params["season_number"] = str(query.season)
-        if query.episode is not None:
-            params["episode_number"] = str(query.episode)
-
-        url = f"https://api.opensubtitles.com/api/v1/subtitles?{urllib.parse.urlencode(params)}"
         headers = {
             "Api-Key": api_key,
             "Accept": "application/json",
             "User-Agent": DEFAULT_USER_AGENT,
         }
-        try:
-            status, _hdrs, data = self._request(url, method="GET", headers=headers)
-            if status != 200:
+        norm_query_imdb = _normalize_imdb_id(query.imdb_id)
+        is_episode = query.media_type == "episode" or (
+            query.season is not None and query.episode is not None
+        )
+
+        def _fetch_os(use_imdb: bool) -> List[Dict[str, Any]]:
+            params: Dict[str, Any] = {"languages": iso1}
+            if query.movie_hash:
+                params["moviehash"] = query.movie_hash
+            if use_imdb and norm_query_imdb:
+                num_imdb = str(int(norm_query_imdb[2:]))
+                if is_episode:
+                    params["parent_imdb_id"] = num_imdb
+                else:
+                    params["imdb_id"] = num_imdb
+            elif query.title:
+                params["query"] = query.title
+                if query.year is not None:
+                    params["year"] = str(query.year)
+            if query.season is not None:
+                params["season_number"] = str(query.season)
+            if query.episode is not None:
+                params["episode_number"] = str(query.episode)
+
+            url = f"https://api.opensubtitles.com/api/v1/subtitles?{urllib.parse.urlencode(params)}"
+            try:
+                status, _hdrs, data = self._request(url, method="GET", headers=headers)
+                if status != 200:
+                    return []
+                payload = json.loads(data.decode("utf-8"))
+                return list(payload.get("data") or [])
+            except Exception as e:
+                self._log(f"OpenSubtitles search error: {e}")
                 return []
-            payload = json.loads(data.decode("utf-8"))
-        except Exception as e:
-            self._log(f"OpenSubtitles search error: {e}")
-            return []
+
+        entries = _fetch_os(use_imdb=bool(norm_query_imdb))
+        if not entries and norm_query_imdb and query.title:
+            entries = _fetch_os(use_imdb=False)
 
         results: List[SubtitleCandidate] = []
-        for entry in payload.get("data") or []:
+        for entry in entries:
             attrs = entry.get("attributes") or {}
             files = attrs.get("files") or []
             if not files:
@@ -953,10 +1012,30 @@ class SubtitleFetcher:
             if not file_id:
                 continue
             feature = attrs.get("feature_details") or {}
+            is_ep_feat = str(feature.get("feature_type") or "").lower() == "episode"
+            if is_ep_feat:
+                raw_title = (
+                    feature.get("parent_title")
+                    or feature.get("title")
+                    or feature.get("movie_name")
+                    or query.title
+                    or "Unknown"
+                )
+                cand_imdb = _normalize_imdb_id(feature.get("parent_imdb_id") or feature.get("imdb_id"))
+            else:
+                raw_title = (
+                    feature.get("title")
+                    or feature.get("movie_name")
+                    or query.title
+                    or "Unknown"
+                )
+                cand_imdb = _normalize_imdb_id(feature.get("imdb_id"))
+            clean_title = _clean_candidate_title(str(raw_title)) or str(raw_title)
+
             cand = SubtitleCandidate(
                 provider="opensubtitles",
                 subtitle_id=str(entry.get("id") or file_id),
-                title=str(feature.get("movie_name") or feature.get("title") or query.title or "Unknown"),
+                title=clean_title,
                 language=str(attrs.get("language") or iso1),
                 release_name=str(attrs.get("release") or file_info.get("file_name") or ""),
                 year=feature.get("year") if isinstance(feature.get("year"), int) else query.year,
@@ -970,6 +1049,7 @@ class SubtitleFetcher:
                 download_url=None,
                 download_id=str(file_id),
                 file_name=file_info.get("file_name"),
+                imdb_id=cand_imdb,
             )
             results.append(cand)
         return results
@@ -1087,18 +1167,36 @@ class SubtitleFetcher:
 
                 seen_urls.add(dl_url)
                 sub_id = str(sub.get("id") or dl_url)
+                sub_file_name = sub.get("subtitleFileName") or sub.get("fileName")
+                release_name = str(
+                    sub.get("movieReleaseName")
+                    or sub.get("release")
+                    or sub_file_name
+                    or sub_id
+                )
+                match_flag = str(sub.get("m") or "").lower()
+                hash_matched = bool(is_hash_query and match_flag == "h")
+                hi_flag = bool(
+                    re.search(
+                        r"(?:^|[^a-z0-9])(?:hi|sdh)(?=$|[^a-z0-9])",
+                        str(sub_file_name or release_name).lower(),
+                    )
+                )
                 results.append(
                     SubtitleCandidate(
                         provider="stremio_opensubtitles",
                         subtitle_id=sub_id,
                         title=query.title or imdb_id,
                         language=sub_lang or iso2,
-                        release_name=str(sub.get("release") or sub_id),
+                        release_name=release_name,
                         year=query.year,
                         season=query.season,
                         episode=query.episode,
-                        hash_matched=False,
+                        hearing_impaired=hi_flag,
+                        hash_matched=hash_matched,
                         download_url=dl_url,
+                        file_name=str(sub_file_name) if sub_file_name else None,
+                        imdb_id=_normalize_imdb_id(imdb_id),
                     )
                 )
             if results and is_hash_query:
@@ -1199,6 +1297,16 @@ class SubtitleFetcher:
                 "podnapisi",
             ]
 
+        search_query = MediaQuery(**query.to_dict())
+        if (
+            not search_query.imdb_id
+            and search_query.title
+            and any(p in ("opensubtitles", "subdl", "stremio_opensubtitles") for p in provider_list)
+        ):
+            resolved_imdb = self._resolve_imdb_id(search_query)
+            if resolved_imdb:
+                search_query.imdb_id = resolved_imdb
+
         all_candidates: List[SubtitleCandidate] = []
         search_fns = {
             "opensubtitles": self._search_opensubtitles,
@@ -1211,13 +1319,13 @@ class SubtitleFetcher:
             fn = search_fns.get(pname)
             if fn is None:
                 continue
-            found = fn(query)
+            found = fn(search_query)
             all_candidates.extend(found)
 
         # Deduplicate while keeping highest-scoring candidate per (provider, download_target)
         dedup: Dict[Tuple[str, str], SubtitleCandidate] = {}
         for cand in all_candidates:
-            score_candidate(cand, query)
+            score_candidate(cand, search_query)
             key = (cand.provider, cand.download_url or cand.download_id or cand.subtitle_id)
             if key not in dedup or cand.score > dedup[key].score:
                 dedup[key] = cand
